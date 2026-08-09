@@ -2,10 +2,9 @@
 # Loads the shared notebook as a Python module and renders a multi-tab UI
 # with forecasts, backtests, and recommendations.
 
-import json
-import pathlib
-import types
-import sys
+# Streamlit dashboard for weekly dengue surveillance.
+# Renders a multi-tab UI with forecasts, backtests, and recommendations.
+
 from typing import Dict, List, Tuple, Union, cast
 
 import numpy as np
@@ -14,37 +13,15 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-
-# loads the notebook as a Python module so we can call its functions directly
-def _import_notebook(notebook_path: str, module_name: str = "cp_shared"):
-    """Import all code cells from a Jupyter notebook as a Python module."""
-    nb_path = pathlib.Path(notebook_path)
-    with open(nb_path, "r", encoding="utf-8") as f:
-        nb = json.load(f)
-    # grab source from code cells only, skip markdown and any export-tagged cells
-    code_parts = []
-    for cell in nb["cells"]:
-        if cell["cell_type"] != "code":
-            continue
-        source = "".join(cell["source"])
-        if "--- EXPORT CELL" in source:
-            continue
-        code_parts.append(source)
-    # compile everything into a fresh module object so cp.function_name() works
-    full_source = "\n\n".join(code_parts)
-    module = types.ModuleType(module_name)
-    module.__file__ = str(nb_path)
-    exec(compile(full_source, str(nb_path), "exec"), module.__dict__)
-    sys.modules[module_name] = module
-    return module
+import src as cp
 
 
-# load the shared notebook as a module, it needs to be in the same folder as this file
-_nb_path = pathlib.Path(__file__).parent / "cp_shared_explained.ipynb"
-cp = _import_notebook(str(_nb_path))
-
-st.set_page_config(page_title="Weekly Dengue Surveillance Dashboard", page_icon="🦟",
-    layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="Weekly Dengue Surveillance Dashboard",
+    page_icon="🦟",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 # all the colors used across the dashboard
 ACCENT = "#2A9D8F"   # teal, used for primary highlights
