@@ -5,6 +5,8 @@ An end-to-end dengue surveillance and forecasting application built with Python 
 **Live dashboard:**  
 https://dengue-surveillance.streamlit.app/
 
+<img width="1512" height="615" alt="Screenshot 2026-08-09 at 6 45 15 PM" src="https://github.com/user-attachments/assets/3e121289-12e5-4625-aaa0-1105c6a12608" />
+
 ---
 
 ## Overview
