@@ -501,37 +501,48 @@ def build_monitoring_state(
     # 10. Residual-based uncertainty bands
     # -----------------------------------------------------------------
 
-    residual_source = (
-        holdout_bt
-        if len(holdout_bt) >= 8
-        else backtest_results
+    # Calibrate uncertainty only on predictions made BEFORE the final
+    # holdout period. This keeps holdout interval coverage genuinely
+    # out-of-sample.
+    calibration_bt = (
+        selection_bt
+        .dropna(
+            subset=[prod_col]
+        )
+        .copy()
     )
-
+    
+    if len(calibration_bt) < 8:
+        raise RuntimeError(
+            "Not enough pre-holdout predictions are available "
+            "to calibrate forecast uncertainty."
+        )
+    
     residuals = (
-        residual_source[
+        calibration_bt[
             "actual"
         ].to_numpy(
             dtype=float
         )
-        - residual_source[
+        - calibration_bt[
             prod_col
         ].to_numpy(
             dtype=float
         )
     )
-
+    
     valid_residuals = residuals[
         np.isfinite(
             residuals
         )
     ]
-
-    if len(valid_residuals) == 0:
+    
+    if len(valid_residuals) < 8:
         raise RuntimeError(
-            "No valid production-model residuals "
-            "are available for uncertainty estimation."
+            "Not enough valid pre-holdout residuals are available "
+            "for uncertainty estimation."
         )
-
+    
     r_lo, r_hi = np.quantile(
         valid_residuals,
         BAND_QUANTILES,
