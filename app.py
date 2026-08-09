@@ -1,1822 +1,851 @@
-"""Streamlit dashboard for weekly dengue surveillance.
+# Streamlit dashboard for weekly dengue surveillance.
+# Loads the shared notebook as a Python module and renders a multi-tab UI
+# with forecasts, backtests, and recommendations.
 
-Presentation lives here.
-Data ingestion, modeling, evaluation, forecasting, and orchestration
-live in the src package.
-"""
+# Streamlit dashboard for weekly dengue surveillance.
+# Renders a multi-tab UI with forecasts, backtests, and recommendations.
 
-from typing import Dict, List
+from typing import Dict, List, Tuple, Union, cast
 
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from src.config import TARGET_UF_CODE, TREND_THRESHOLD, UF_OPTIONS
-from src.data import build_weekly_series, cache_exists, get_cache_info
-from src.evaluation import build_error_table, score_predictions
-from src.pipeline import build_monitoring_state
+import src as cp
 
-
-# ============================================================
-# PAGE CONFIG
-# ============================================================
 
 st.set_page_config(
-    page_title="Dengue Surveillance Dashboard",
+    page_title="Weekly Dengue Surveillance Dashboard",
     page_icon="🦟",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-
-# ============================================================
-# VISUAL CONSTANTS
-# ============================================================
-
-ACCENT = "#2A9D8F"
-GREEN = "#2FBF71"
-ORANGE = "#F4A261"
-RED = "#E76F51"
-BLUE = "#4EA8DE"
-PURPLE = "#8B7CF6"
-
-TEXT = "#E7EEF2"
-MUTED = "#8FA6B2"
-BACKGROUND = "#081318"
+# all the colors used across the dashboard
+ACCENT = "#2A9D8F"   # teal, used for primary highlights
+BG = "#081318"        # deep navy background
+TEXT = "#E7EEF2"      # near-white body text
+MUTED = "#8FA6B2"     # secondary/caption text
 GRID = "rgba(170, 190, 200, 0.12)"
+GREEN = "#2FBF71"     # low risk / stable
+ORANGE = "#F4A261"    # moderate risk
+RED = "#E76F51"       # high risk
+BLUE = "#4EA8DE"      # series line colour
+LAVENDER = "#8B7CF6"  # negative binomial
 
-MODEL_COLORS = {
+# fixed colour per model so the same model always shows the same colour across charts
+MODEL_colors = {
     "Naive": "#C9D1D9",
     "Seasonal Naive": "#7C86A3",
     "Linear Regression": BLUE,
     "Random Forest": GREEN,
-    "Negative Binomial": PURPLE,
+    "Negative Binomial": LAVENDER,
 }
 
+SettingsDict = Dict[str, Union[int, bool, str]]
 
-# ============================================================
-# CSS
-# ============================================================
 
+# pushes all the custom CSS into the page, called once at the start of main()
 def inject_css() -> None:
     st.markdown(
         f"""
         <style>
-        .stApp {{
-            background:
-                radial-gradient(
-                    circle at top left,
-                    #10232d 0%,
-                    {BACKGROUND} 45%
-                );
-            color: {TEXT};
-        }}
-
-        [data-testid="stSidebar"] {{
-            background: rgba(10, 24, 31, 0.97);
-            border-right: 1px solid rgba(143, 166, 178, 0.12);
-        }}
-
-        .block-container {{
-            padding-top: 2rem;
-            padding-bottom: 2rem;
-        }}
-
-        .subtitle {{
-            color: {MUTED};
-            font-size: 0.98rem;
-            margin-top: -0.35rem;
-        }}
-
-        .meta {{
-            color: {MUTED};
-            font-size: 0.85rem;
-            margin-top: 0.25rem;
-        }}
-
-        .outlook {{
-            background: linear-gradient(
-                90deg,
-                rgba(42, 157, 143, 0.16),
-                rgba(42, 157, 143, 0.04)
-            );
-            border: 1px solid rgba(42, 157, 143, 0.24);
-            border-radius: 18px;
-            padding: 1rem 1.2rem;
-            margin: 1rem 0;
-        }}
-
-        .outlook-label,
-        .metric-label {{
-            color: {MUTED};
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-        }}
-
-        .outlook-value {{
-            font-size: 1.2rem;
-            font-weight: 650;
-            margin-top: 0.25rem;
-        }}
-
-        .metric-card {{
-            background: rgba(15, 28, 35, 0.92);
-            border: 1px solid rgba(143, 166, 178, 0.12);
-            border-radius: 16px;
-            padding: 1rem;
-            min-height: 100px;
-        }}
-
-        .metric-value {{
-            font-size: 1.45rem;
-            font-weight: 650;
-            margin-top: 0.4rem;
-        }}
-
-        .metric-note {{
-            color: {MUTED};
-            font-size: 0.82rem;
-            margin-top: 0.2rem;
-        }}
-
-        .info-box {{
-            background: rgba(15, 28, 35, 0.75);
-            border: 1px solid rgba(143, 166, 178, 0.10);
-            border-radius: 14px;
-            padding: 1rem;
-        }}
-
-        .footer {{
-            color: {MUTED};
-            font-size: 0.8rem;
-            margin-top: 2rem;
-        }}
+            .stApp {{
+                background: radial-gradient(circle at top left, #10232d 0%, {BG} 44%);
+                color: {TEXT};
+            }}
+            [data-testid="stSidebar"] {{
+                background: rgba(10, 24, 31, 0.95);
+                border-right: 1px solid rgba(143, 166, 178, 0.12);
+            }}
+            .block-container {{
+                padding-top: 2.1rem;
+                padding-bottom: 1.5rem;
+            }}
+            .title-block {{
+                padding: 0.2rem 0 1rem 0;
+            }}
+            .subtitle, .meta-line, .section-note, .footer-note {{
+                color: {MUTED};
+            }}
+            .subtitle {{
+                font-size: 0.98rem;
+                margin-top: -0.2rem;
+            }}
+            .meta-line {{
+                font-size: 0.88rem;
+                margin-top: 0.35rem;
+            }}
+            .outlook-banner {{
+                background: linear-gradient(90deg, rgba(42,157,143,0.16) 0%, rgba(42,157,143,0.06) 100%);
+                border: 1px solid rgba(42,157,143,0.22);
+                border-radius: 18px;
+                padding: 1rem 1.2rem;
+                margin: 1rem 0 1.1rem 0;
+            }}
+            .outlook-kicker, .metric-label, .takeaway-title {{
+                color: {MUTED};
+                font-size: 0.77rem;
+                text-transform: uppercase;
+                letter-spacing: 0.08em;
+            }}
+            .outlook-main {{
+                font-size: 1.15rem;
+                font-weight: 600;
+                margin: 0.25rem 0 0.15rem 0;
+            }}
+            .outlook-sub, .metric-note {{
+                color: {MUTED};
+                font-size: 0.88rem;
+            }}
+            .metric-card, .mini-card, .sidebar-card, .surface, .takeaway-box {{
+                background: rgba(15, 28, 35, 0.92);
+                border: 1px solid rgba(143, 166, 178, 0.12);
+                border-radius: 18px;
+                box-shadow: 0 16px 38px rgba(0, 0, 0, 0.16);
+            }}
+            .recommendation-card {{
+                background: rgba(255, 255, 255, 0.015);
+                border-radius: 10px;
+                padding: 0.85rem 0.95rem 0.75rem 0.95rem;
+                border-left: 3px solid var(--rec-accent);
+                margin-top: 0.2rem;
+                margin-bottom: 0.2rem;
+            }}
+            .recommendation-title {{
+                color: {TEXT};
+                font-size: 0.98rem;
+                font-weight: 600;
+                margin-bottom: 0.55rem;
+            }}
+            .recommendation-list {{
+                margin: 0;
+                padding-left: 1.1rem;
+                color: {TEXT};
+            }}
+            .recommendation-list li {{
+                margin-bottom: 0.35rem;
+                line-height: 1.4;
+            }}
+            .metric-card, .mini-card {{
+                padding: 0.95rem 1rem;
+                min-height: 92px;
+            }}
+            .sidebar-card, .surface, .takeaway-box {{
+                padding: 0.95rem 1rem;
+            }}
+            .metric-value {{
+                font-size: 1.5rem;
+                font-weight: 650;
+                line-height: 1.1;
+                margin-top: 0.45rem;
+            }}
+            .takeaway-strip {{
+                display: grid;
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 0.85rem;
+                margin-bottom: 1rem;
+            }}
+            .takeaway-value {{
+                font-size: 1rem;
+                font-weight: 600;
+                margin-top: 0.35rem;
+            }}
+            .stTabs [data-baseweb="tab-list"] {{
+                gap: 0.45rem;
+                margin-bottom: 0.9rem;
+            }}
+            .stTabs [data-baseweb="tab"] {{
+                background: rgba(15, 28, 35, 0.55);
+                border-radius: 999px;
+                padding: 0.45rem 0.95rem;
+                color: {MUTED};
+            }}
+            .stTabs [aria-selected="true"] {{
+                background: rgba(42,157,143,0.14);
+                color: {TEXT};
+            }}
+            .stExpander {{
+                background: rgba(15, 28, 35, 0.55);
+                border: 1px solid rgba(143, 166, 178, 0.09);
+                border-radius: 14px;
+            }}
         </style>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ============================================================
-# SMALL HELPERS
-# ============================================================
-
-def format_number(value: float) -> str:
+# small helpers for formatting numbers and picking colors
+def format_int(value: float) -> str:
+    """Round to int and add thousands separator."""
     return f"{int(round(float(value))):,}"
 
 
-def status_color(label: str) -> str:
+def status_colour(label: str) -> str:
+    # returns the right colour based on trend or risk label
     if label in {"Low", "Stable"}:
         return GREEN
-
     if label == "Moderate":
         return ORANGE
-
     if label in {"High", "Very High"}:
         return RED
-
+    # anything unexpected gets blue
     return BLUE
 
 
-def metric_card(
-    label: str,
-    value: str,
-    note: str = "",
-    color: str = TEXT,
-) -> None:
+def recommendations_accent(risk_label: str) -> str:
+    # picks the accent colour for the recommendation card left border
+    if risk_label == "Low":
+        return GREEN
+    if risk_label == "Moderate":
+        return ORANGE
+    # high and very high both get red
+    return RED
+
+
+# draws a metric card as HTML, compact=True makes it slightly smaller
+def render_card(label: str, value: str, note: str = "", colour: str = TEXT, compact: bool = False) -> None:
+    class_name = "mini-card" if compact else "metric-card"
     st.markdown(
         f"""
-        <div class="metric-card">
+        <div class="{class_name}">
             <div class="metric-label">{label}</div>
-
-            <div
-                class="metric-value"
-                style="color:{color};"
-            >
-                {value}
-            </div>
-
-            <div class="metric-note">
-                {note}
-            </div>
+            <div class="metric-value" style="color:{colour};">{value}</div>
+            <div class="metric-note">{note}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ============================================================
-# CACHE WRAPPERS
-# ============================================================
-
-@st.cache_data(
-    show_spinner=False,
-    ttl=3600,
-)
-def get_weekly_data(
-    uf_code: int,
-):
-    return build_weekly_series(
-        refresh=False,
-        uf_code=uf_code,
-    )
+# these two are cached for 1 hour so reruns don't re-download or recompute everything
+@st.cache_data(show_spinner=False, ttl=3600)
+def _cached_weekly_series(uf_code: int = 32, _refresh_key: str = ""):
+    """Thin wrapper so Streamlit can cache the weekly data between reruns."""
+    return cp.build_weekly_series(refresh=False, uf_code=uf_code)
 
 
-@st.cache_data(
-    show_spinner=False,
-    ttl=3600,
-)
-def get_monitoring_state(
-    uf_code: int,
-    horizon: int,
-    include_nb: bool,
-):
-    return build_monitoring_state(
-        horizon=horizon,
-        include_nb=include_nb,
-        refresh_data=False,
-        uf_code=uf_code,
-    )
+@st.cache_data(show_spinner=False, ttl=3600)
+def load_state(include_nb: bool, horizon: int, uf_code: int = 32):
+    """Cache the full monitoring state dict so reruns are instant."""
+    return cp.build_monitoring_state(horizon=horizon, include_nb=include_nb, refresh_data=False, uf_code=uf_code)
 
 
-# ============================================================
-# EVALUATION HELPERS
-# ============================================================
-
-def build_change_table(
-    backtest: pd.DataFrame,
-    model_cols: Dict[str, str],
-) -> pd.DataFrame:
-    rows: List[dict] = []
-
-    for model_name, prediction_col in model_cols.items():
-        sample = (
-            backtest
-            .dropna(
-                subset=[prediction_col]
-            )
-            .copy()
-        )
-
+# builds a MAE/RMSE table for each model from a given backtest slice
+def build_error_table(backtest_slice: pd.DataFrame, model_cols: Dict[str, str]) -> pd.DataFrame:
+    rows: List[Dict[str, object]] = []
+    for model_name, column in model_cols.items():
+        sample = backtest_slice.dropna(subset=[column]).copy()
+        # skip this model if it has no predictions for this slice
         if sample.empty:
             continue
-
-        scores = score_predictions(
-            sample["actual"].to_numpy(),
-            sample[prediction_col].to_numpy(),
-            sample["previous_week"].to_numpy(),
-        )
-
-        rows.append(
-            {
-                "Model": model_name,
-                "Direction Accuracy": scores[
-                    "Direction Acc."
-                ],
-                "Rising Recall": scores[
-                    "Rising Recall"
-                ],
-                "Rising Precision": scores[
-                    "Rising Precision"
-                ],
-                "Rising F1": scores[
-                    "Rising F1"
-                ],
-                "False Alarm Rate": scores[
-                    "False Alarm Rate"
-                ],
-            }
-        )
-
+        rows.append({
+            "Model": model_name,
+            "MAE": float(np.mean(np.abs(sample["actual"] - sample[column]))),
+            "RMSE": float(np.sqrt(np.mean((sample["actual"] - sample[column]) ** 2))),
+        })
     if not rows:
-        return pd.DataFrame()
+        return pd.DataFrame(columns=["Model", "MAE", "RMSE"])
+    return pd.DataFrame(rows).sort_values(["MAE", "RMSE"]).reset_index(drop=True)
 
-    return (
-        pd.DataFrame(rows)
-        .sort_values(
-            "Rising F1",
-            ascending=False,
-        )
-        .reset_index(drop=True)
+
+# builds precision, recall, F1 and false alarm rate for the rising-week signal
+def build_change_metrics(backtest_slice: pd.DataFrame, model_cols: Dict[str, str]) -> pd.DataFrame:
+    rows: List[Dict[str, object]] = []
+    for model_name, column in model_cols.items():
+        sample = backtest_slice.dropna(subset=[column]).copy()
+        if sample.empty:
+            continue
+        score = cp.score_predictions(sample["actual"].to_numpy(), sample[column].to_numpy(), sample["previous_week"].to_numpy())
+        rows.append({
+            "Model": model_name,
+            "Direction accuracy": float(score["Direction Acc."]),
+            "Rising-week recall": float(score["Rising Recall"]),
+            "Rising-week precision": float(score["Rising Precision"]),
+            "F1": float(score["Rising F1"]),
+            "False-alarm rate": float(score["False Alarm Rate"]),
+        })
+    if not rows:
+        return pd.DataFrame(columns=["Model", "Direction accuracy", "Rising-week recall", "Rising-week precision", "F1", "False-alarm rate"])
+    return pd.DataFrame(rows).sort_values("F1", ascending=False).reset_index(drop=True)
+
+
+# prepares the rolling average series, yearly totals, and seasonal profile for the overview tab
+def prepare_overview_data(df: pd.DataFrame, rolling_window: int) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    overview_df = df.copy()
+    overview_df["rolling"] = overview_df["notifications"].rolling(rolling_window).mean()
+    yearly_summary = (
+        overview_df.groupby("year")
+        .agg(Total=("notifications", "sum"), Average=("notifications", "mean"), Peak=("notifications", "max"))
+        .round(0)
+        .astype(int)
+        .reset_index()
+        .rename(columns={"year": "Year"})
     )
-
-
-# ============================================================
-# CHARTS
-# ============================================================
-
-def history_chart(
-    df: pd.DataFrame,
-    rolling_window: int,
-) -> go.Figure:
-    chart_df = df.copy()
-
-    chart_df["rolling"] = (
-        chart_df["notifications"]
-        .rolling(
-            rolling_window
-        )
+    seasonal_profile = (
+        overview_df.groupby("epi_week", as_index=False)["notifications"]
         .mean()
+        .rename(columns={"epi_week": "Epi week", "notifications": "Average notifications"})
     )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df["date"],
-            y=chart_df["notifications"],
-            name="Weekly notifications",
-            line=dict(
-                color=BLUE,
-                width=2,
-            ),
-        )
-    )
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df["date"],
-            y=chart_df["rolling"],
-            name=(
-                f"{rolling_window}-week "
-                "rolling average"
-            ),
-            line=dict(
-                color=ACCENT,
-                width=2.7,
-            ),
-        )
-    )
-
-    fig.update_layout(
-        height=430,
-        margin=dict(
-            t=20,
-            r=20,
-            b=40,
-            l=20,
-        ),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(
-            orientation="h",
-            y=1.08,
-        ),
-        xaxis_title="Week",
-        yaxis_title="Notifications",
-    )
-
-    fig.update_xaxes(
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        gridcolor=GRID,
-    )
-
-    return fig
+    return overview_df, yearly_summary, seasonal_profile
 
 
-def seasonal_chart(
-    df: pd.DataFrame,
-) -> go.Figure:
-    profile = (
-        df.groupby(
-            "epi_week",
-            as_index=False,
-        )["notifications"]
-        .mean()
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Bar(
-            x=profile["epi_week"],
-            y=profile["notifications"],
-            marker_color=ACCENT,
-            name="Average notifications",
-        )
-    )
-
-    fig.update_layout(
-        height=320,
-        margin=dict(
-            t=20,
-            r=20,
-            b=40,
-            l=20,
-        ),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        showlegend=False,
-        xaxis_title="Epidemiological week",
-        yaxis_title="Average notifications",
-    )
-
-    fig.update_xaxes(
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        gridcolor=GRID,
-    )
-
-    return fig
+# main chart with the weekly series, rolling average, and a dot marking the all-time peak
+def build_main_chart(overview_df: pd.DataFrame, peak_date: pd.Timestamp, peak_value: int) -> go.Figure:
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(x=overview_df["date"], y=overview_df["notifications"], name="Weekly notifications", line=dict(color=BLUE, width=2)))
+    figure.add_trace(go.Scatter(x=overview_df["date"], y=overview_df["rolling"], name="Rolling average", line=dict(color=ACCENT, width=2.6)))
+    # the peak marker is a separate trace so we can label it with its value
+    figure.add_trace(go.Scatter(x=[peak_date], y=[peak_value], mode="markers+text",
+        marker=dict(size=9, color="#F7FAFC", line=dict(width=1, color=ACCENT)),
+        text=[f"Peak {peak_value:,}"], textposition="top center", showlegend=False))
+    figure.update_layout(height=430, margin=dict(t=16, r=16, b=48, l=16), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.03, x=0), xaxis_title="Week start", yaxis_title="Notifications")
+    figure.update_xaxes(showgrid=False)
+    figure.update_yaxes(gridcolor=GRID)
+    return figure
 
 
-def backtest_chart(
-    backtest: pd.DataFrame,
-    model_cols: Dict[str, str],
-    selected_models: List[str],
-    prod_col: str,
-    r_lo: float,
-    r_hi: float,
-) -> go.Figure:
-    chart_df = backtest.copy()
+# bar chart showing the average seasonal shape by epi week
+def build_seasonal_chart(seasonal_profile: pd.DataFrame) -> go.Figure:
+    figure = px.bar(seasonal_profile, x="Epi week", y="Average notifications", color="Average notifications", color_continuous_scale=["#12313D", ACCENT, ORANGE])
+    figure.update_layout(height=280, margin=dict(t=10, r=10, b=32, l=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", coloraxis_showscale=False, xaxis_title="Epi week", yaxis_title="Average notifications")
+    figure.update_xaxes(showgrid=False)
+    figure.update_yaxes(gridcolor=GRID)
+    return figure
 
-    chart_df["lower"] = np.clip(
-        chart_df[prod_col] + r_lo,
-        0,
-        None,
-    )
 
-    chart_df["upper"] = np.clip(
-        chart_df[prod_col] + r_hi,
-        0,
-        None,
-    )
+# shows actual vs model lines for the holdout period, with the safety band shaded in
+def build_backtest_chart(backtest_2025: pd.DataFrame, model_cols: Dict[str, str], visible_models: List[str], prod_col: str, r_lo: float, r_hi: float) -> go.Figure:
+    chart_df = backtest_2025.copy().reset_index(drop=True)
+    chart_df["band_lower"] = np.clip(chart_df[prod_col] + r_lo, 0, None)
+    chart_df["band_upper"] = np.clip(chart_df[prod_col] + r_hi, 0, None)
 
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=chart_df["date"],
-            y=chart_df["actual"],
-            name="Actual",
-            line=dict(
-                color=TEXT,
-                width=2.8,
-            ),
-        )
-    )
-
-    for model_name in selected_models:
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(x=chart_df["date"], y=chart_df["actual"], name="Actual", line=dict(color="#F2F6FA", width=2.7)))
+    for model_name in visible_models:
         if model_name not in model_cols:
             continue
-
-        column = model_cols[
-            model_name
-        ]
-
-        line_style = {
-            "color": MODEL_COLORS.get(
-                model_name,
-                BLUE,
-            ),
-            "width": 2,
-        }
-
+        column = model_cols[model_name]
+        style: Dict[str, object] = dict(color=MODEL_colors.get(model_name, BLUE), width=2)
         if model_name == "Naive":
-            line_style[
-                "dash"
-            ] = "dash"
-
+            style["dash"] = "dash"
+            style["width"] = 2.2
         elif model_name == "Seasonal Naive":
-            line_style[
-                "dash"
-            ] = "dot"
+            style["dash"] = "dot"
+        figure.add_trace(go.Scatter(x=chart_df["date"], y=chart_df[column], name=model_name, line=style))
 
-        fig.add_trace(
-            go.Scatter(
-                x=chart_df["date"],
-                y=chart_df[column],
-                name=model_name,
-                line=line_style,
-            )
-        )
+    # safety band is drawn as a filled polygon by concatenating upper and reversed lower
+    figure.add_trace(go.Scatter(x=pd.concat([chart_df["date"], chart_df["date"][::-1]]),
+        y=pd.concat([chart_df["band_upper"], chart_df["band_lower"][::-1]]),
+        fill="toself", fillcolor="rgba(42,157,143,0.12)",
+        line=dict(color="rgba(42,157,143,0.18)", width=1),
+        name="Safety band", hoverinfo="skip"))
 
-    fig.add_trace(
-        go.Scatter(
-            x=list(
-                chart_df["date"]
-            )
-            + list(
-                chart_df[
-                    "date"
-                ][::-1]
-            ),
-            y=list(
-                chart_df["upper"]
-            )
-            + list(
-                chart_df[
-                    "lower"
-                ][::-1]
-            ),
-            fill="toself",
-            fillcolor=(
-                "rgba(42,157,143,0.12)"
-            ),
-            line=dict(
-                color=(
-                    "rgba(42,157,143,0)"
-                )
-            ),
-            name="Safety band",
-            hoverinfo="skip",
-        )
-    )
+    # cap the y-axis at the 98.5th percentile so one outlier doesn't squash everything
+    y_candidates = [chart_df["actual"], chart_df["band_upper"]]
+    for model_name in visible_models:
+        if model_name in model_cols:
+            y_candidates.append(chart_df[model_cols[model_name]])
+    y_cap = float(pd.concat(y_candidates, axis=0).quantile(0.985)) * 1.08
+    y_cap = max(y_cap, float(chart_df["actual"].max()) * 1.05)
 
-    fig.update_layout(
-        height=480,
-        margin=dict(
-            t=20,
-            r=20,
-            b=40,
-            l=20,
-        ),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(
-            orientation="h",
-            y=1.08,
-        ),
-        xaxis_title="Week",
-        yaxis_title="Notifications",
-    )
-
-    fig.update_xaxes(
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        gridcolor=GRID,
-    )
-
-    return fig
+    figure.update_layout(height=480, margin=dict(t=14, r=16, b=48, l=16), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.03, x=0), xaxis_title="Week start", yaxis_title="Notifications", yaxis_range=[0, y_cap])
+    figure.update_xaxes(showgrid=False)
+    figure.update_yaxes(gridcolor=GRID)
+    return figure
 
 
-def forecast_chart(
-    history: pd.DataFrame,
-    forecast_df: pd.DataFrame,
-    display_model: str,
-) -> go.Figure:
-    fig = go.Figure()
+# chart for the monitoring card, connects recent observed weeks to the dashed forecast line
+def build_monitoring_chart(recent_df: pd.DataFrame, forecast_slice: pd.DataFrame, display_model: str) -> go.Figure:
+    labels = recent_df["date"].dt.strftime("%Y-%m-%d").tolist()
+    future_labels = forecast_slice["date"].dt.strftime("%Y-%m-%d").tolist()
+    future_values = forecast_slice[display_model].astype(float).tolist()
+    lower_values = forecast_slice["lower"].astype(float).tolist()
+    upper_values = forecast_slice["upper"].astype(float).tolist()
 
-    fig.add_trace(
-        go.Scatter(
-            x=history["date"],
-            y=history["notifications"],
-            name="Observed",
-            line=dict(
-                color=BLUE,
-                width=2.5,
-            ),
-            mode="lines+markers",
-        )
-    )
-
-    latest_date = history[
-        "date"
-    ].iloc[-1]
-
-    latest_value = float(
-        history[
-            "notifications"
-        ].iloc[-1]
-    )
-
-    forecast_dates = [
-        latest_date
-    ] + forecast_df[
-        "date"
-    ].tolist()
-
-    forecast_values = [
-        latest_value
-    ] + forecast_df[
-        display_model
-    ].astype(
-        float
-    ).tolist()
-
-    fig.add_trace(
-        go.Scatter(
-            x=forecast_dates,
-            y=forecast_values,
-            name="Forecast",
-            line=dict(
-                color=ACCENT,
-                width=2.5,
-                dash="dash",
-            ),
-            mode="lines+markers",
-        )
-    )
-
-    upper_values = [
-        latest_value
-    ] + forecast_df[
-        "upper"
-    ].astype(
-        float
-    ).tolist()
-
-    lower_values = [
-        latest_value
-    ] + forecast_df[
-        "lower"
-    ].astype(
-        float
-    ).tolist()
-
-    fig.add_trace(
-        go.Scatter(
-            x=(
-                forecast_dates
-                + forecast_dates[::-1]
-            ),
-            y=(
-                upper_values
-                + lower_values[::-1]
-            ),
-            fill="toself",
-            fillcolor=(
-                "rgba(42,157,143,0.13)"
-            ),
-            line=dict(
-                color=(
-                    "rgba(42,157,143,0)"
-                )
-            ),
-            name="Safety band",
-            hoverinfo="skip",
-        )
-    )
-
-    fig.update_layout(
-        height=400,
-        margin=dict(
-            t=20,
-            r=20,
-            b=40,
-            l=20,
-        ),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        legend=dict(
-            orientation="h",
-            y=1.08,
-        ),
-        xaxis_title="Week",
-        yaxis_title="Notifications",
-    )
-
-    fig.update_xaxes(
-        showgrid=False,
-    )
-
-    fig.update_yaxes(
-        gridcolor=GRID,
-    )
-
-    return fig
+    figure = go.Figure()
+    figure.add_trace(go.Scatter(x=labels, y=recent_df["notifications"], name="Observed", line=dict(color=BLUE, width=2.4), mode="lines+markers", marker=dict(size=5)))
+    # the forecast trace starts at the last observed point so there's no visual gap
+    figure.add_trace(go.Scatter(x=[labels[-1]] + future_labels, y=[float(recent_df["notifications"].iloc[-1])] + future_values, name="Forecast", line=dict(color=ACCENT, width=2.2, dash="dash"), mode="lines+markers", marker=dict(size=8, symbol="diamond")))
+    # highlight the selected week with a bigger diamond
+    figure.add_trace(go.Scatter(x=[future_labels[-1]], y=[future_values[-1]], name="Selected week", mode="markers", marker=dict(size=13, symbol="diamond", color=ACCENT, line=dict(color="#F7FAFC", width=1.2))))
+    figure.add_trace(go.Scatter(x=[labels[-1]] + future_labels + future_labels[::-1] + [labels[-1]], y=[float(recent_df["notifications"].iloc[-1])] + upper_values + lower_values[::-1] + [float(recent_df["notifications"].iloc[-1])], fill="toself", fillcolor="rgba(42,157,143,0.12)", line=dict(color="rgba(42,157,143,0.14)", width=1), name="Safety band", hoverinfo="skip"))
+    y_cap = max(float(recent_df["notifications"].max()), max(upper_values)) * 1.12
+    figure.update_layout(height=360, margin=dict(t=12, r=16, b=36, l=16), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", legend=dict(orientation="h", y=1.04, x=0), xaxis_title="Week start", yaxis_title="Notifications", yaxis_range=[0, y_cap])
+    figure.update_xaxes(type="category", showgrid=False)
+    figure.update_yaxes(gridcolor=GRID)
+    return figure
 
 
-# ============================================================
-# INTERPRETATION
-# ============================================================
-
-def classify_forecast(
-    forecast: float,
-    latest_actual: float,
-    historical: pd.Series,
-):
-    pct_change = (
-        forecast
-        - latest_actual
-    ) / max(
-        latest_actual,
-        1,
-    )
-
-    if pct_change > TREND_THRESHOLD:
-        trend = "Rising"
-
-    elif pct_change < -TREND_THRESHOLD:
-        trend = "Falling"
-
+# figures out the trend and risk level for the selected forecast week
+def derive_selected_outlook(selected_forecast: float, latest_actual: int, df: pd.DataFrame) -> Tuple[str, str]:
+    pct_change = (selected_forecast - latest_actual) / max(latest_actual, 1)
+    if pct_change > cp.TREND_THRESHOLD:
+        trend_label = "Rising"
+    elif pct_change < -cp.TREND_THRESHOLD:
+        trend_label = "Falling"
     else:
-        trend = "Stable"
+        trend_label = "Stable"
 
-    q50, q75, q90 = (
-        historical.quantile(
-            [
-                0.50,
-                0.75,
-                0.90,
-            ]
-        )
+    # risk thresholds are based on the historical distribution of weekly notifications
+    q50, q75, q90 = df["notifications"].quantile([0.50, 0.75, 0.90]).values
+    if selected_forecast >= q90:
+        risk_label = "Very High"
+    elif selected_forecast >= q75:
+        risk_label = "High"
+    elif selected_forecast >= q50:
+        risk_label = "Moderate"
+    else:
+        risk_label = "Low"
+    return trend_label, risk_label
+
+
+# returns the right set of recommendations based on risk level, sourced from WHO and MoH
+def build_recommendations(risk_label: str, trend_label: str) -> Dict[str, object]:
+    trend_text = trend_label.lower()
+    sources: List[Tuple[str, str]] = [
+        ("WHO Dengue Fact Sheet", "https://www.who.int/news-room/fact-sheets/detail/dengue-and-severe-dengue"),
+        ("Brazilian Ministry of Health Dengue", "https://www.gov.br/saude/pt-br/assuntos/saude-de-a-a-z/d/dengue"),
+    ]
+    # these three actions apply at every risk level
+    base_actions = [
+        "Remove standing water from buckets, drains, gutters, plant pots, and other containers.",
+        "Keep water tanks and storage containers covered and clean.",
+        "Use repellent, screens, and clothing that reduces mosquito bites during the day.",
+    ]
+
+    if risk_label == "Low":
+        return {
+            "title": "Maintain prevention",
+            "actions": base_actions + [
+                "Keep a weekly home inspection routine even while activity is low.",
+                "If fever begins with headache, body pain, nausea, or rash, seek care early.",
+            ],
+            "sources": sources,
+        }
+    if risk_label == "Moderate":
+        return {
+            "title": "Increase household vigilance",
+            "actions": base_actions + [
+                f"Inspect the home and nearby outdoor areas more than once per week while activity is moderate and trend is {trend_text}.",
+                "Prioritize protection for older adults, children, pregnant people, and anyone with chronic conditions.",
+                "If symptoms start, rest, drink fluids, and get medical evaluation promptly.",
+            ],
+            "sources": sources,
+        }
+    if risk_label == "High":
+        return {
+            "title": "Act now to reduce exposure",
+            "actions": base_actions + [
+                "Use daytime bite protection every day at home, school, and work.",
+                "Do not self-medicate with ibuprofen or aspirin if dengue is suspected; seek medical guidance.",
+                f"Seek care quickly for fever or worsening symptoms, especially while the trend is {trend_text}.",
+            ],
+            "sources": sources,
+        }
+    # very high risk
+    return {
+        "title": "High-alert recommendations",
+        "actions": base_actions + [
+            "Treat suspected dengue symptoms as urgent and look for medical care quickly.",
+            "Watch for warning signs such as severe abdominal pain, persistent vomiting, bleeding, breathing difficulty, fainting, or extreme weakness.",
+            "Reduce exposure immediately for the whole household and follow local public-health guidance closely.",
+        ],
+        "sources": sources,
+    }
+
+
+# generates a short note comparing the latest year total to the peak year
+def build_context_note(overview_df: pd.DataFrame, peak_year: int) -> str:
+    latest_year = int(overview_df["year"].iloc[-1])
+    if latest_year == peak_year:
+        return f"{latest_year} remains the peak year in the current analysis window."
+    latest_total = int(overview_df.loc[overview_df["year"] == latest_year, "notifications"].sum())
+    peak_total = int(overview_df.loc[overview_df["year"] == peak_year, "notifications"].sum())
+    return f"{latest_year} notifications so far are about {latest_total / max(peak_total, 1) * 100:.0f}% of the {peak_year} total."
+
+
+# renders everything in the sidebar: area picker, cache info, refresh button, settings sliders
+def render_sidebar(settings: SettingsDict) -> SettingsDict:
+    st.sidebar.markdown(
+        """
+        <div class="title-block">
+            <div style="font-size:1.05rem;font-weight:650;line-height:1.25;">Weekly Dengue Surveillance Dashboard</div>
+            <div class="meta-line">Source: SINAN/Dengue, Brazilian Ministry of Health</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    # area dropdown, maps display names to UF codes
+    uf_options = cp.UF_OPTIONS
+    uf_names = list(uf_options.values())
+    uf_codes = list(uf_options.keys())
+    default_uf = int(settings.get("uf_code", cp.TARGET_UF_CODE) or cp.TARGET_UF_CODE)
+    default_idx = uf_codes.index(default_uf) if default_uf in uf_codes else 0
+    selected_name = st.sidebar.selectbox("Area", uf_names, index=default_idx)
+    selected_uf_code = uf_codes[uf_names.index(selected_name)]
+    settings["uf_code"] = selected_uf_code
+    st.sidebar.markdown(f"<div class='subtitle'>{selected_name}, Brazil</div>", unsafe_allow_html=True)
+    # show when data was last cached and offer a refresh button
+    cache_info = cp.get_cache_info(uf_code=selected_uf_code)
+    if cache_info:
+        last_updated = cache_info.get("created_local", "unknown")[:16].replace("T", " ")
+        latest_date = cache_info.get("latest_date", "?")
+        st.sidebar.caption(f"📦 Data cached · latest week: {latest_date} · updated: {last_updated}")
+    else:
+        st.sidebar.caption("📦 No local cache, data will be downloaded")
+    settings["refresh_data"] = st.sidebar.button("🔄 Refresh data from source", use_container_width=True)
+
+    with st.sidebar.expander("Settings", expanded=False):
+        settings["forecast_horizon"] = st.slider("Forecast weeks ahead of today", 1, 12, int(settings["forecast_horizon"]))
+        settings["rolling_window"] = st.slider("Rolling-average window (weeks)", 2, 12, int(settings["rolling_window"]))
+        settings["monitoring_weeks"] = st.slider("Weeks shown in monitoring card chart", 8, 12, int(settings["monitoring_weeks"]))
+        settings["include_nb"] = st.checkbox("Include Negative Binomial model", value=bool(settings["include_nb"]))
+    return settings
+
+
+def _show_nb_status(state: Dict[str, object]) -> None:
+    # warn the user if NB was turned on but the fit didn't converge and got dropped
+    nb_status = state.get("nb_status", "off")
+    if nb_status == "omitted":
+        st.sidebar.warning("Negative Binomial model was enabled but omitted because the fit did not converge on this data window.", icon="⚠️")
+
+
+# small summary card at the bottom of the sidebar showing the selected week outlook
+def render_sidebar_summary(selected_date: pd.Timestamp, selected_forecast: float, trend_label: str, risk_label: str) -> None:
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-card">
+            <div class="metric-label">Forecast summary</div>
+            <div class="metric-note" style="margin-top:0.6rem;">Forecast week</div>
+            <div style="font-size:1.02rem;font-weight:600;">{selected_date.strftime('%Y-%m-%d')}</div>
+            <div class="metric-note" style="margin-top:0.65rem;">Forecast</div>
+            <div style="font-size:1.02rem;font-weight:600;">{format_int(selected_forecast)}</div>
+            <div class="metric-note" style="margin-top:0.65rem;">Trend</div>
+            <div style="font-size:1.02rem;font-weight:600;color:{status_colour(trend_label)};">{trend_label}</div>
+            <div class="metric-note" style="margin-top:0.65rem;">Risk</div>
+            <div style="font-size:1.02rem;font-weight:600;color:{status_colour(risk_label)};">{risk_label}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if forecast >= q90:
-        risk = "Very High"
 
-    elif forecast >= q75:
-        risk = "High"
+# renders the models tab with the winner box, holdout tables, and change-signal metrics
+def render_models_tab(state: Dict[str, object], holdout_table: pd.DataFrame, selection_table: pd.DataFrame, full_table: pd.DataFrame, change_holdout: pd.DataFrame, change_selection: pd.DataFrame) -> None:
+    selection_scores = pd.DataFrame(state["selection_score_table"]).copy()
+    selection_winner = selection_scores.iloc[0]["Model"] if not selection_scores.empty else selection_table.iloc[0]["Model"] if not selection_table.empty else state["prod_name"]
+    display_model_name = str(state.get("display_model", state["prod_name"]))
+    st.markdown(
+        f"""
+        <div class="takeaway-strip">
+            <div class="takeaway-box">
+                <div class="takeaway-title">Pre-holdout selection winner</div>
+                <div class="takeaway-value">{selection_winner}</div>
+            </div>
+            <div class="takeaway-box">
+                <div class="takeaway-title">Production model (trend &amp; risk)</div>
+                <div class="takeaway-value">{state['prod_name']}</div>
+            </div>
+            <div class="takeaway-box">
+                <div class="takeaway-title">Chart display model</div>
+                <div class="takeaway-value">{display_model_name}</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    elif forecast >= q50:
-        risk = "Moderate"
+    st.markdown("### 2025 Holdout — Key Real-World Test")
+    st.dataframe(holdout_table.style.format({"MAE": "{:.1f}", "RMSE": "{:.1f}"}), width="stretch", hide_index=True)
+    if not holdout_table.empty:
+        best_holdout = str(holdout_table.iloc[0]["Model"])
+        learned_only = holdout_table[~holdout_table["Model"].isin(["Naive", "Seasonal Naive"])]
+        if not learned_only.empty:
+            learned_name = str(learned_only.iloc[0]["Model"])
+            gap = float(learned_only.iloc[0]["MAE"]) / max(float(holdout_table.iloc[0]["MAE"]), 0.01)
+            st.markdown(f"<div class='section-note'>Best holdout model: {best_holdout} · Closest learned model: {learned_name} · Gap vs naive: {gap:.1f}x MAE</div>", unsafe_allow_html=True)
 
-    else:
-        risk = "Low"
+    with st.expander("Earlier backtests", expanded=False):
+        st.markdown("**Pre-holdout selection period metrics**")
+        st.dataframe(selection_table.style.format({"MAE": "{:.1f}", "RMSE": "{:.1f}"}), width="stretch", hide_index=True)
+        st.markdown("**Full backtest metrics**")
+        st.dataframe(full_table.style.format({"MAE": "{:.1f}", "RMSE": "{:.1f}"}), width="stretch", hide_index=True)
 
-    return trend, risk
+    with st.expander("Change-signal metrics", expanded=False):
+        fmt = {"Direction accuracy": "{:.0%}", "Rising-week recall": "{:.0%}", "Rising-week precision": "{:.0%}", "F1": "{:.2f}", "False-alarm rate": "{:.0%}"}
+        st.markdown("**2025 holdout**")
+        st.dataframe(change_holdout.style.format(fmt), width="stretch", hide_index=True)
+        st.markdown("**Pre-holdout selection period**")
+        st.dataframe(change_selection.style.format(fmt), width="stretch", hide_index=True)
 
 
-# ============================================================
-# MAIN APP
-# ============================================================
-
+# main function, wires everything together and renders the full dashboard
 def main() -> None:
     inject_css()
 
-    # --------------------------------------------------------
-    # SIDEBAR
-    # --------------------------------------------------------
+    # starting defaults, the sidebar widgets will override these on the first render
+    settings: SettingsDict = {"forecast_horizon": 3, "rolling_window": 4, "monitoring_weeks": 10, "include_nb": False, "uf_code": cp.TARGET_UF_CODE}
+    settings = render_sidebar(settings)
+    forecast_horizon = cast(int, settings["forecast_horizon"])
+    rolling_window = cast(int, settings["rolling_window"])
+    monitoring_weeks = cast(int, settings["monitoring_weeks"])
+    include_nb = cast(bool, settings["include_nb"])
+    uf_code = cast(int, settings["uf_code"])
+    uf_label = cp.UF_OPTIONS.get(uf_code, f"UF {uf_code}")
+    refresh_data = bool(settings.get("refresh_data", False))
 
-    st.sidebar.title(
-        "🦟 Dengue Surveillance"
-    )
-
-    uf_names = list(
-        UF_OPTIONS.values()
-    )
-
-    uf_codes = list(
-        UF_OPTIONS.keys()
-    )
-
-    default_index = (
-        uf_codes.index(
-            TARGET_UF_CODE
-        )
-        if TARGET_UF_CODE
-        in uf_codes
-        else 0
-    )
-
-    selected_state = (
-        st.sidebar.selectbox(
-            "State",
-            uf_names,
-            index=default_index,
-        )
-    )
-
-    uf_code = uf_codes[
-        uf_names.index(
-            selected_state
-        )
-    ]
-
-    horizon = (
-        st.sidebar.slider(
-            "Forecast horizon (weeks)",
-            min_value=1,
-            max_value=12,
-            value=3,
-        )
-    )
-
-    rolling_window = (
-        st.sidebar.slider(
-            "Rolling average",
-            min_value=2,
-            max_value=12,
-            value=4,
-        )
-    )
-
-    monitoring_weeks = (
-        st.sidebar.slider(
-            "Recent weeks shown",
-            min_value=8,
-            max_value=24,
-            value=12,
-        )
-    )
-
-    include_nb = (
-        st.sidebar.checkbox(
-            "Include Negative Binomial",
-            value=False,
-        )
-    )
-
-    refresh = (
-        st.sidebar.button(
-            "🔄 Refresh source data",
-            use_container_width=True,
-        )
-    )
-
-    cache_info = get_cache_info(
-        uf_code=uf_code
-    )
-
-    if cache_info:
-        st.sidebar.caption(
-            "Latest cached week: "
-            f"{cache_info.get('latest_date', 'unknown')}"
-        )
-
-    # --------------------------------------------------------
-    # REFRESH / INITIAL LOAD
-    # --------------------------------------------------------
-
-    if refresh:
-        with st.spinner(
-            "Downloading latest SINAN data..."
-        ):
-            build_weekly_series(
-                refresh=True,
-                uf_code=uf_code,
-            )
-
-        get_weekly_data.clear()
-        get_monitoring_state.clear()
-
+    # if the user hit refresh, re-download the data and clear the caches so everything reloads fresh
+    if refresh_data:
+        with st.spinner("Downloading latest data from Ministry of Health..."):
+            cp.build_weekly_series(refresh=True, uf_code=uf_code)
+        _cached_weekly_series.clear()
+        load_state.clear()
         st.rerun()
 
-    if not cache_exists(
-        uf_code=uf_code
-    ):
-        with st.spinner(
-            "Downloading dengue data..."
-        ):
-            build_weekly_series(
-                refresh=True,
-                uf_code=uf_code,
-            )
+    # first time ever running this for the selected area, download the data before loading it
+    if not cp.cache_is_fresh(uf_code=uf_code):
+        with st.spinner("Downloading data for the first time, this may take a minute..."):
+            cp.build_weekly_series(refresh=True, uf_code=uf_code)
 
-    # --------------------------------------------------------
-    # DETERMINE DATA GAP
-    # --------------------------------------------------------
+    # extend the horizon by the data lag so we always forecast into the actual future
+    with st.spinner("Loading surveillance state..."):
+        _pre_raw, _pre_full, _pre_df = _cached_weekly_series(uf_code=uf_code)
+        _latest_data_date = _pre_df["date"].max()
+        _today = pd.Timestamp.today().normalize()
+        _data_gap_weeks = max(0, int((_today - _latest_data_date).days // 7))
+        effective_horizon = _data_gap_weeks + forecast_horizon
+        state = load_state(include_nb, effective_horizon, uf_code=uf_code)
 
-    with st.spinner(
-        "Preparing surveillance data..."
-    ):
-        _, _, preliminary_df = (
-            get_weekly_data(
-                uf_code
-            )
-        )
+    # unpack everything from the state dict so the rest of the function is easy to read
+    df = pd.DataFrame(state["df"]).copy()
+    backtest_results = pd.DataFrame(state["backtest_results"]).copy()
+    model_cols = dict(state["model_cols"])
+    forecast_df = pd.DataFrame(state["forecast_df"]).copy()
+    display_model = str(state["display_model"])
 
-    latest_source_date = pd.Timestamp(
-        preliminary_df[
-            "date"
-        ].max()
-    )
+    peak_idx = int(df["notifications"].idxmax())
+    peak_value = int(df.loc[peak_idx, "notifications"])
+    peak_date = pd.Timestamp(df.loc[peak_idx, "date"])
+    latest_actual = int(state["latest_actual"])
+    latest_date = pd.Timestamp(state["latest_date"])
+    prod_forecast = float(state["prod_forecast"])
+    display_forecast = float(state.get("display_forecast", prod_forecast))
+    trend_label = str(state["trend_label"])
+    risk_label = str(state["risk_label"])
+    prod_name = str(state["prod_name"])
+    prod_col = str(state["prod_col"])
+    prod_learned_name = str(state["prod_learned_name"])
+    next_lower = float(state["next_lower"])
+    next_upper = float(state["next_upper"])
+    next_date = pd.Timestamp(state["next_date"])
+    recent_mae = float(state["recent_mae"])
+    holdout_coverage = float(state["cov"])
+    total_notifications = int(df["notifications"].sum())
+    average_weekly = float(df["notifications"].mean())
 
-    today = (
-        pd.Timestamp.today()
-        .normalize()
-    )
+    overview_df, yearly_summary, seasonal_profile = prepare_overview_data(df, rolling_window)
+    context_note = build_context_note(overview_df, peak_year=int(peak_date.year))
+    imputed_zero_weeks = int(df["is_imputed_zero_week"].sum())
 
-    data_gap_weeks = max(
-        0,
-        int(
-            (
-                today
-                - latest_source_date
-            ).days
-            // 7
-        ),
-    )
+    # prefer the actual 2025 rows from backtest_results, fall back to the saved holdout slice
+    holdout_2025 = backtest_results[backtest_results["date"].dt.year == 2025].copy()
+    if holdout_2025.empty:
+        holdout_2025 = pd.DataFrame(state["holdout_bt"]).copy()
+    holdout_table = build_error_table(holdout_2025, model_cols)
+    selection_table = build_error_table(pd.DataFrame(state["recent_selection_bt"]).copy(), model_cols)
+    full_table = build_error_table(backtest_results, model_cols)
+    change_holdout = build_change_metrics(holdout_2025, model_cols)
+    change_selection = build_change_metrics(pd.DataFrame(state["recent_selection_bt"]).copy(), model_cols)
 
-    effective_horizon = (
-        horizon
-        + data_gap_weeks
-    )
+    # only show forecast weeks that haven't happened yet
+    # fall back to the last N rows if somehow all forecast dates are already past (stale cache)
+    _today = pd.Timestamp.today().normalize()
+    future_forecast_df = forecast_df[forecast_df["date"] > _today].copy().reset_index(drop=True)
+    if future_forecast_df.empty:
+        future_forecast_df = forecast_df.tail(forecast_horizon).copy().reset_index(drop=True)
+    # future_step is the 1-based index shown in the sidebar dropdown labels
+    future_forecast_df["future_step"] = range(1, len(future_forecast_df) + 1)
 
-    # --------------------------------------------------------
-    # BUILD PIPELINE
-    # --------------------------------------------------------
-
-    with st.spinner(
-        "Running forecasting pipeline..."
-    ):
-        state = (
-            get_monitoring_state(
-                uf_code,
-                effective_horizon,
-                include_nb,
-            )
-        )
-
-    # --------------------------------------------------------
-    # UNPACK
-    # --------------------------------------------------------
-
-    df = pd.DataFrame(
-        state[
-            "df"
-        ]
-    ).copy()
-
-    forecast_df = pd.DataFrame(
-        state[
-            "forecast_df"
-        ]
-    ).copy()
-
-    backtest_results = (
-        pd.DataFrame(
-            state[
-                "backtest_results"
-            ]
-        )
-        .copy()
-    )
-
-    holdout_bt = (
-        pd.DataFrame(
-            state[
-                "holdout_bt"
-            ]
-        )
-        .copy()
-    )
-
-    selection_bt = (
-        pd.DataFrame(
-            state[
-                "recent_selection_bt"
-            ]
-        )
-        .copy()
-    )
-
-    model_cols = dict(
-        state[
-            "model_cols"
-        ]
-    )
-
-    prod_name = str(
-        state[
-            "prod_name"
-        ]
-    )
-
-    prod_col = str(
-        state[
-            "prod_col"
-        ]
-    )
-
-    display_model = str(
-        state[
-            "display_model"
-        ]
-    )
-
-    latest_actual = int(
-        state[
-            "latest_actual"
-        ]
-    )
-
-    latest_date = pd.Timestamp(
-        state[
-            "latest_date"
-        ]
-    )
-
-    recent_mae = float(
-        state[
-            "recent_mae"
-        ]
-    )
-
-    coverage = float(
-        state[
-            "cov"
-        ]
-    )
-
-    r_lo = float(
-        state[
-            "r_lo"
-        ]
-    )
-
-    r_hi = float(
-        state[
-            "r_hi"
-        ]
-    )
-
-    # --------------------------------------------------------
-    # FIND ACTUAL FUTURE FORECASTS
-    # --------------------------------------------------------
-
-    future_forecasts = (
-        forecast_df.loc[
-            forecast_df[
-                "date"
-            ]
-            > today
-        ]
-        .copy()
-        .reset_index(
-            drop=True
-        )
-    )
-
-    if future_forecasts.empty:
-        future_forecasts = (
-            forecast_df
-            .tail(
-                horizon
-            )
-            .copy()
-            .reset_index(
-                drop=True
-            )
-        )
-
-    future_forecasts = (
-        future_forecasts
-        .head(
-            horizon
-        )
-        .copy()
-    )
-
-    future_forecasts[
-        "week_ahead"
-    ] = range(
-        1,
-        len(
-            future_forecasts
-        )
-        + 1,
-    )
-
-    step_labels = {
-        (
-            f"Week +{row['week_ahead']} · "
-            f"{pd.Timestamp(row['date']).strftime('%Y-%m-%d')}"
-        ): int(
-            row[
-                "step"
-            ]
-        )
-        for _, row
-        in future_forecasts.iterrows()
+    forecast_step_options = {
+        f"Week +{int(row['future_step'])} · {pd.Timestamp(row['date']).strftime('%Y-%m-%d')}": int(row["step"])
+        for _, row in future_forecast_df.iterrows()
     }
+    selected_step_label = st.sidebar.selectbox("Forecast week",
+        options=list(forecast_step_options.keys()),
+        index=min(forecast_horizon - 1, len(forecast_step_options) - 1),
+        key=f"forecast-step-{forecast_horizon}")
+    selected_step = forecast_step_options[selected_step_label]
+    selected_row = forecast_df.loc[forecast_df["step"] == selected_step].iloc[0]
+    forecast_slice = forecast_df.iloc[: int(selected_row["step"])].copy().reset_index(drop=True)
+    selected_step = int(selected_row["step"])
+    selected_date = pd.Timestamp(selected_row["date"])
+    selected_display_forecast = float(selected_row[display_model])
+    # use the production model for trend and risk, not whatever is set as the display model
+    selected_prod_forecast = float(selected_row[prod_name]) if prod_name in selected_row.index else selected_display_forecast
+    selected_lower = float(selected_row["lower"])
+    selected_upper = float(selected_row["upper"])
+    selected_trend, selected_risk = derive_selected_outlook(selected_prod_forecast, latest_actual, df)
+    recommendations = build_recommendations(selected_risk, selected_trend)
 
-    if not step_labels:
-        st.error(
-            "No future forecast weeks are available."
-        )
+    _show_nb_status(state)
 
-        st.stop()
+    st.sidebar.caption(f"Latest available source week: {latest_date.strftime('%Y-%m-%d')} · Data lag: ~{_data_gap_weeks} week(s) · Selected forecast date: {selected_date.strftime('%Y-%m-%d')}")
+    if prod_name != display_model:
+        st.sidebar.caption(f"Trend & risk: {prod_name} · Chart: {display_model}")
 
-    selected_label = (
-        st.sidebar.selectbox(
-            "Forecast week",
-            list(
-                step_labels.keys()
-            ),
-            index=0,
-        )
-    )
+    render_sidebar_summary(selected_date, selected_prod_forecast, selected_trend, selected_risk)
 
-    selected_step = (
-        step_labels[
-            selected_label
-        ]
-    )
-
-    selected_row = (
-        forecast_df.loc[
-            forecast_df[
-                "step"
-            ]
-            == selected_step
-        ]
-        .iloc[0]
-    )
-
-    selected_date = pd.Timestamp(
-        selected_row[
-            "date"
-        ]
-    )
-
-    selected_forecast = float(
-        selected_row[
-            prod_name
-        ]
-        if prod_name
-        in selected_row.index
-        else selected_row[
-            display_model
-        ]
-    )
-
-    selected_lower = float(
-        selected_row[
-            "lower"
-        ]
-    )
-
-    selected_upper = float(
-        selected_row[
-            "upper"
-        ]
-    )
-
-    trend_label, risk_label = (
-        classify_forecast(
-            selected_forecast,
-            latest_actual,
-            df[
-                "notifications"
-            ],
-        )
-    )
-
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
-
-    st.title(
-        "Weekly Dengue Surveillance Dashboard"
-    )
-
+    peak_share = latest_actual / max(peak_value, 1) * 100
     st.markdown(
         f"""
-        <div class="subtitle">
-            {selected_state}, Brazil
+        <div class="title-block">
+            <h1 style="margin:0;">Weekly Dengue Surveillance Dashboard</h1>
+            <div class="subtitle">Multi-week surveillance forecast for {uf_label}, Brazil</div>
+            <div class="meta-line">Analysis window: {df['date'].min().date()} to {df['date'].max().date()}</div>
+            <div class="meta-line">Latest source data: {latest_date.date()} · Forecasting {forecast_horizon} week(s) ahead of today</div>
         </div>
-
-        <div class="meta">
-            Source: SINAN/Dengue · Brazilian Ministry of Health
-            · Latest observed week: {latest_date.date()}
+        <div class="outlook-banner">
+            <div class="outlook-kicker">Current outlook</div>
+            <div class="outlook-main">{selected_trend} and {selected_risk.lower()}</div>
+            <div class="outlook-sub">Selected week: {selected_date.strftime('%Y-%m-%d')} · Relative to peak: {selected_prod_forecast / max(peak_value, 1) * 100:.0f}% of {peak_value:,}</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown(
-        f"""
-        <div class="outlook">
-            <div class="outlook-label">
-                Selected forecast outlook
-            </div>
+    # four summary cards at the top of the page
+    kpi_cols = st.columns(4)
+    with kpi_cols[0]:
+        render_card("Total notifications", format_int(total_notifications), "Current analysis window")
+    with kpi_cols[1]:
+        render_card("Weeks analyzed", format_int(len(df)), "Weekly surveillance series")
+    with kpi_cols[2]:
+        render_card("Peak weekly notifications", format_int(peak_value), "Highest observed week")
+    with kpi_cols[3]:
+        render_card("Average weekly notifications", format_int(average_weekly), "Mean across weeks shown")
 
-            <div
-                class="outlook-value"
-                style="color:{status_color(risk_label)};"
-            >
-                {trend_label} · {risk_label} risk
-            </div>
+    # four tabs: history, model accuracy, backtest chart, live monitoring card
+    tabs = st.tabs(["Overview", "Models & Evaluation", "Backtest", "Monitoring Card"])
 
-            <div class="metric-note">
-                {selected_date.strftime("%Y-%m-%d")}
-                · {format_number(selected_forecast)} projected notifications
-                · safety band
-                {format_number(selected_lower)}
-                –
-                {format_number(selected_upper)}
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    with tabs[0]:
+        st.markdown("### Weekly dengue notifications over time")
+        st.plotly_chart(build_main_chart(overview_df, peak_date, peak_value), use_container_width=True)
+        st.markdown(f"<div class='section-note'>{context_note}</div>", unsafe_allow_html=True)
 
-    # --------------------------------------------------------
-    # TOP METRICS
-    # --------------------------------------------------------
+        col_left, col_right = st.columns([1, 1])
+        with col_left:
+            st.markdown("### Yearly summary")
+            st.dataframe(yearly_summary, width="stretch", hide_index=True)
+        with col_right:
+            st.markdown("### Seasonal profile by epi week")
+            st.plotly_chart(build_seasonal_chart(seasonal_profile), use_container_width=True)
 
-    peak_idx = (
-        df[
-            "notifications"
-        ].idxmax()
-    )
-
-    peak_value = int(
-        df.loc[
-            peak_idx,
-            "notifications",
-        ]
-    )
-
-    peak_date = pd.Timestamp(
-        df.loc[
-            peak_idx,
-            "date",
-        ]
-    )
-
-    metrics = st.columns(
-        4
-    )
-
-    with metrics[0]:
-        metric_card(
-            "Latest observed",
-            format_number(
-                latest_actual
-            ),
-            latest_date.strftime(
-                "%Y-%m-%d"
-            ),
-        )
-
-    with metrics[1]:
-        metric_card(
-            "Selected forecast",
-            format_number(
-                selected_forecast
-            ),
-            selected_date.strftime(
-                "%Y-%m-%d"
-            ),
-            ACCENT,
-        )
-
-    with metrics[2]:
-        metric_card(
-            "Historical peak",
-            format_number(
-                peak_value
-            ),
-            peak_date.strftime(
-                "%Y-%m-%d"
-            ),
-        )
-
-    with metrics[3]:
-        metric_card(
-            "Production model",
-            prod_name,
-            f"Recent MAE: {recent_mae:.1f}"
-            if np.isfinite(
-                recent_mae
-            )
-            else "Recent MAE unavailable",
-        )
-
-    # --------------------------------------------------------
-    # TABS
-    # --------------------------------------------------------
-
-    (
-        overview_tab,
-        models_tab,
-        backtest_tab,
-        monitoring_tab,
-    ) = st.tabs(
-        [
-            "Overview",
-            "Models & Evaluation",
-            "Backtest",
-            "Monitoring",
-        ]
-    )
-
-    # ========================================================
-    # OVERVIEW
-    # ========================================================
-
-    with overview_tab:
-        st.subheader(
-            "Weekly notifications"
-        )
-
-        st.plotly_chart(
-            history_chart(
-                df,
-                rolling_window,
-            ),
-            use_container_width=True,
-        )
-
-        col1, col2 = (
-            st.columns(
-                2
-            )
-        )
-
-        with col1:
-            st.subheader(
-                "Yearly summary"
-            )
-
-            yearly_summary = (
-                df.groupby(
-                    "year"
-                )
-                .agg(
-                    Total=(
-                        "notifications",
-                        "sum",
-                    ),
-                    Average=(
-                        "notifications",
-                        "mean",
-                    ),
-                    Peak=(
-                        "notifications",
-                        "max",
-                    ),
-                )
-                .reset_index()
-                .rename(
-                    columns={
-                        "year": "Year"
-                    }
-                )
-            )
-
-            yearly_summary[
-                "Average"
-            ] = yearly_summary[
-                "Average"
-            ].round(
-                1
-            )
-
-            st.dataframe(
-                yearly_summary,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        with col2:
-            st.subheader(
-                "Seasonality"
-            )
-
-            st.plotly_chart(
-                seasonal_chart(
-                    df
-                ),
-                use_container_width=True,
-            )
-
-        with st.expander(
-            "Data quality notes"
-        ):
-            zero_weeks = int(
-                df[
-                    "is_imputed_zero_week"
-                ].sum()
-            )
-
-            st.markdown(
-                f"""
-                - The signal represents **weekly notifications**, not confirmed cases.
-                - Missing calendar weeks are kept explicitly and filled with zero.
-                - Zero-filled weeks in the current analysis window: **{zero_weeks}**.
-                - Recent observations may later change because of reporting delays.
-                """
-            )
-
-    # ========================================================
-    # MODELS
-    # ========================================================
-
-    with models_tab:
-        st.subheader(
-            "Model selection"
-        )
-
-        selection_scores = (
-            pd.DataFrame(
-                state[
-                    "selection_score_table"
-                ]
-            )
-            .copy()
-        )
-
-        if not selection_scores.empty:
-            st.dataframe(
-                selection_scores,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-        else:
-            st.info(
-                "No composite selection-score table was available."
-            )
-
-        st.subheader(
-            "Final holdout performance"
-        )
-
-        holdout_errors = (
-            build_error_table(
-                holdout_bt,
-                model_cols,
-            )
-        )
-
-        st.dataframe(
-            holdout_errors,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.caption(
-            f"Production model: {prod_name}"
-            f" · Chart model: {display_model}"
-            f" · Selection basis: "
-            f"{state['ranking_basis']}"
-        )
-
-        with st.expander(
-            "Direction and outbreak-change metrics"
-        ):
-            change_metrics = (
-                build_change_table(
-                    holdout_bt,
-                    model_cols,
-                )
-            )
-
-            if not change_metrics.empty:
-                percentage_cols = [
-                    "Direction Accuracy",
-                    "Rising Recall",
-                    "Rising Precision",
-                    "False Alarm Rate",
-                ]
-
-                formatted = (
-                    change_metrics.copy()
-                )
-
-                for column in (
-                    percentage_cols
-                ):
-                    formatted[
-                        column
-                    ] = (
-                        formatted[
-                            column
-                        ]
-                        * 100
-                    ).round(
-                        1
-                    )
-
-                formatted[
-                    "Rising F1"
-                ] = formatted[
-                    "Rising F1"
-                ].round(
-                    3
-                )
-
-                st.dataframe(
-                    formatted,
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        with st.expander(
-            "Pre-holdout selection-period errors"
-        ):
-            selection_errors = (
-                build_error_table(
-                    selection_bt,
-                    model_cols,
-                )
-            )
-
-            st.dataframe(
-                selection_errors,
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    # ========================================================
-    # BACKTEST
-    # ========================================================
-
-    with backtest_tab:
-        st.subheader(
-            "Expanding-window backtest"
-        )
-
-        available_models = [
-            name
-            for name
-            in MODEL_COLORS
-            if name
-            in model_cols
-        ]
-
-        default_models = [
-            name
-            for name
-            in [
-                "Naive",
-                "Linear Regression",
-                "Random Forest",
+        with st.expander("Data quality notes", expanded=False):
+            # collecting into a list keeps each note on its own line without using \n inline
+            quality_notes = [
+                "- Signal is weekly notifications, not confirmed cases.",
+                f"- Zero-filled weeks in the analysis window: {imputed_zero_weeks}.",
+                "- Missing weeks are treated as zero notifications in the weekly series.",
+                "- Recent weeks may still move as reporting catches up.",
             ]
-            if name
-            in available_models
-        ]
+            st.markdown("\n".join(quality_notes))
 
-        selected_models = (
-            st.multiselect(
-                "Models shown",
-                available_models,
-                default=default_models,
-            )
-        )
+    with tabs[1]:
+        render_models_tab(state, holdout_table, selection_table, full_table, change_holdout, change_selection)
 
-        if not holdout_bt.empty:
-            st.plotly_chart(
-                backtest_chart(
-                    holdout_bt,
-                    model_cols,
-                    selected_models,
-                    prod_col,
-                    r_lo,
-                    r_hi,
-                ),
-                use_container_width=True,
-            )
+    with tabs[2]:
+        top_cols = st.columns(3)
+        with top_cols[0]:
+            render_card("Production model", prod_name, "Current operational default", compact=True)
+        with top_cols[1]:
+            render_card("Safety-band coverage", f"{holdout_coverage:.0%}", "Share of holdout weeks inside band", colour=ACCENT, compact=True)
+        with top_cols[2]:
+            avg_band_width = float((np.clip(holdout_2025[prod_col] + float(state['r_hi']), 0, None) - np.clip(holdout_2025[prod_col] + float(state['r_lo']), 0, None)).mean()) if not holdout_2025.empty else 0.0
+            render_card("Avg band width", f"{avg_band_width:.1f}", "Notifications", compact=True)
 
-        else:
-            st.info(
-                "No holdout observations available."
-            )
+        available_models = ["Naive", "Linear Regression", "Random Forest"]
+        if "Seasonal Naive" in model_cols:
+            available_models.append("Seasonal Naive")
+        if include_nb and "Negative Binomial" in model_cols:
+            available_models.append("Negative Binomial")
 
-        cards = st.columns(
-            3
-        )
+        visible_models = st.multiselect("Models to display", available_models, default=[m for m in ["Naive", "Linear Regression", "Random Forest"] if m in available_models])
+        st.plotly_chart(build_backtest_chart(holdout_2025, model_cols, visible_models, prod_col, float(state["r_lo"]), float(state["r_hi"])), use_container_width=True)
 
+    with tabs[3]:
+        cards = st.columns(5)
         with cards[0]:
-            metric_card(
-                "Production model",
-                prod_name,
-                "Chosen before final holdout evaluation",
-            )
-
+            render_card("Latest observed", format_int(latest_actual), latest_date.strftime("%Y-%m-%d"), compact=True)
         with cards[1]:
-            metric_card(
-                "Recent MAE",
-                (
-                    f"{recent_mae:.1f}"
-                    if np.isfinite(
-                        recent_mae
-                    )
-                    else "N/A"
-                ),
-                "Last 8 holdout weeks",
-            )
-
+            forecast_label = "Forecast next week" if selected_step == 1 else f"Forecast week +{selected_step}"
+            render_card(forecast_label, format_int(selected_prod_forecast), f"{selected_date.strftime('%Y-%m-%d')} · {prod_name}", colour=ACCENT, compact=True)
         with cards[2]:
-            metric_card(
-                "Safety-band coverage",
-                (
-                    f"{coverage:.0%}"
-                    if np.isfinite(
-                        coverage
-                    )
-                    else "N/A"
-                ),
-                "Final holdout",
-            )
+            render_card("Safety band", f"{int(selected_lower):,}–{int(selected_upper):,}", selected_date.strftime("%Y-%m-%d"), compact=True)
+        with cards[3]:
+            render_card("Trend", selected_trend, f"Based on {prod_name}", colour=status_colour(selected_trend), compact=True)
+        with cards[4]:
+            render_card("Risk", selected_risk, f"Based on {prod_name}", colour=status_colour(selected_risk), compact=True)
 
-    # ========================================================
-    # MONITORING
-    # ========================================================
+        recent_window = df.tail(monitoring_weeks)
+        st.plotly_chart(build_monitoring_chart(recent_window, forecast_slice, display_model), use_container_width=True)
 
-    with monitoring_tab:
-        st.subheader(
-            "Current monitoring outlook"
-        )
-
-        recent_history = (
-            df.tail(
-                monitoring_weeks
-            )
-            .copy()
-        )
-
-        selected_forecast_path = (
-            forecast_df.loc[
-                forecast_df[
-                    "step"
-                ]
-                <= selected_step
+        note_cols = st.columns([1.1, 1])
+        with note_cols[0]:
+            st.markdown("### Model Notes")
+            notes_rows = [
+                ["Production model", prod_name, "Drives trend, risk, and safety bands"],
+                ["Chart display model", display_model, "Used for multi-step chart visualisation"],
+                ["Learned benchmark", prod_learned_name, "Best learned (non-baseline) model"],
+                ["Recent 8-week MAE", f"{recent_mae:.1f}", "Production model accuracy"],
+                ["Holdout band coverage", f"{holdout_coverage:.0%}", "Share of holdout weeks inside band"],
             ]
-            .copy()
-        )
+            notes_df = pd.DataFrame(notes_rows, columns=["Label", "Value", "Explanation"])
+            st.dataframe(notes_df, width="stretch", hide_index=True)
+        with note_cols[1]:
+            st.markdown("### Interpretation")
+            if selected_trend == "Stable":
+                interpretation = "The selected forecast week is expected to remain near the latest observed level."
+            elif selected_trend == "Rising":
+                interpretation = "The selected forecast week is expected to move above the latest observed level."
+            else:
+                interpretation = "The selected forecast week is expected to move below the latest observed level."
+            st.markdown(f"<div class='surface'>{interpretation}</div>", unsafe_allow_html=True)
 
-        st.plotly_chart(
-            forecast_chart(
-                recent_history,
-                selected_forecast_path,
-                display_model,
-            ),
-            use_container_width=True,
-        )
-
-        monitoring_cards = (
-            st.columns(
-                4
-            )
-        )
-
-        with monitoring_cards[0]:
-            metric_card(
-                "Trend",
-                trend_label,
-                (
-                    "Relative to latest "
-                    "observed week"
-                ),
-                status_color(
-                    trend_label
-                ),
-            )
-
-        with monitoring_cards[1]:
-            metric_card(
-                "Risk",
-                risk_label,
-                "Historical percentile",
-                status_color(
-                    risk_label
-                ),
-            )
-
-        with monitoring_cards[2]:
-            metric_card(
-                "Forecast",
-                format_number(
-                    selected_forecast
-                ),
-                selected_date.strftime(
-                    "%Y-%m-%d"
-                ),
-                ACCENT,
-            )
-
-        with monitoring_cards[3]:
-            metric_card(
-                "Safety band",
-                (
-                    f"{format_number(selected_lower)}"
-                    "–"
-                    f"{format_number(selected_upper)}"
-                ),
-                "Residual-based interval",
-            )
-
-        st.markdown(
-            "### Forecast trajectory"
-        )
-
-        display_columns = [
-            column
-            for column
-            in [
-                "date",
-                "step",
-                "Naive",
-                "Seasonal Naive",
-                "Linear Regression",
-                "Random Forest",
-                "Negative Binomial",
-                "lower",
-                "upper",
-            ]
-            if column
-            in future_forecasts.columns
-        ]
-
-        trajectory_table = (
-            future_forecasts[
-                display_columns
-            ]
-            .copy()
-        )
-
-        trajectory_table[
-            "date"
-        ] = trajectory_table[
-            "date"
-        ].dt.strftime(
-            "%Y-%m-%d"
-        )
-
-        st.dataframe(
-            trajectory_table,
-            use_container_width=True,
-            hide_index=True,
-        )
-
-        st.markdown(
-            "### Interpretation"
-        )
-
-        if trend_label == "Rising":
-            interpretation = (
-                "The model expects dengue notifications "
-                "to increase relative to the latest "
-                "observed week."
-            )
-
-        elif trend_label == "Falling":
-            interpretation = (
-                "The model expects dengue notifications "
-                "to decrease relative to the latest "
-                "observed week."
-            )
-
-        else:
-            interpretation = (
-                "The model expects dengue notifications "
-                "to remain relatively close to the latest "
-                "observed level."
-            )
-
+        # build the HTML list items from the action strings before dropping them into the template
+        recommendation_items = "".join(f"<li>{item}</li>" for item in cast(List[str], recommendations["actions"]))
         st.markdown(
             f"""
-            <div class="info-box">
-                <strong>{interpretation}</strong>
-                <br><br>
-                Risk is classified relative to the historical
-                distribution of weekly notifications in the
-                current analysis window.
+            <div style="--rec-accent: {recommendations_accent(selected_risk)};">
+                <div class="recommendation-card">
+                    <div class="recommendation-title">Recommendations — {recommendations['title']}</div>
+                    <ul class="recommendation-list">{recommendation_items}</ul>
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-    # ========================================================
-    # SIDEBAR STATUS
-    # ========================================================
+        source_links = " · ".join(f"[{label}]({url})" for label, url in cast(List[Tuple[str, str]], recommendations["sources"]))
+        st.caption(f"Sources: {source_links}")
 
-    if (
-        state.get(
-            "nb_status"
-        )
-        == "omitted"
-    ):
-        st.sidebar.warning(
-            "Negative Binomial was omitted because "
-            "the fit was unstable or failed to converge."
-        )
-
-    st.sidebar.divider()
-
-    st.sidebar.caption(
-        f"Latest observed: {latest_date.date()}"
-    )
-
-    st.sidebar.caption(
-        f"Source-data lag: ~{data_gap_weeks} week(s)"
-    )
-
-    st.sidebar.caption(
-        f"Production model: {prod_name}"
-    )
-
-    if display_model != prod_name:
-        st.sidebar.caption(
-            f"Multi-step display: {display_model}"
-        )
-
-    # ========================================================
-    # FOOTER
-    # ========================================================
+        with st.expander("All forecast weeks", expanded=False):
+            # drop the internal step columns, keep only the stuff worth showing
+            forecast_columns = [column for column in future_forecast_df.columns if column not in {"date", "step", "future_step", "lower", "upper"}]
+            all_forecasts = future_forecast_df[["date", "future_step"] + forecast_columns + ["lower", "upper"]].copy()
+            all_forecasts = all_forecasts.rename(columns={"future_step": "week ahead"})
+            all_forecasts["date"] = all_forecasts["date"].apply(lambda value: pd.Timestamp(value).strftime("%Y-%m-%d"))
+            st.dataframe(all_forecasts.style.format({column: "{:.1f}" for column in forecast_columns + ["lower", "upper"]}), width="stretch", hide_index=True)
 
     st.markdown(
         """
-        <div class="footer">
-            Source: SINAN/Dengue open-data files,
-            Brazilian Ministry of Health.<br>
-            Forecasts are analytical estimates for surveillance
-            purposes and are not official public-health alerts
-            or clinical diagnoses.
+        <div class="footer-note">
+            Source: SINAN/Dengue official open-data files, Brazilian Ministry of Health<br>
+            Signal: weekly notifications, not confirmed cases<br>
+            Prototype thresholds are heuristic
         </div>
         """,
         unsafe_allow_html=True,
