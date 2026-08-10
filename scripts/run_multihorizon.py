@@ -88,7 +88,7 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=52,
         help=(
-            "Number of pre-holdout target weeks used for "
+            "Number of mature pre-holdout target weeks used for "
             "model selection. Default: 52."
         ),
     )
@@ -109,8 +109,19 @@ def parse_args() -> argparse.Namespace:
         default=0.10,
         help=(
             "Minimum MAE improvement over Naive required "
-            "for a learned model to be promoted. "
+            "overall AND in each half of the selection period. "
             "0.10 means 10%%. Default: 0.10."
+        ),
+    )
+
+    parser.add_argument(
+        "--reporting-delay-weeks",
+        type=int,
+        default=4,
+        help=(
+            "Number of most recent data weeks excluded from "
+            "historical evaluation to reduce sensitivity to "
+            "reporting incompleteness. Default: 4."
         ),
     )
 
@@ -132,7 +143,7 @@ def parse_args() -> argparse.Namespace:
 def print_overall_summary(
     summary,
 ) -> None:
-    """Print performance across the complete historical evaluation."""
+    """Print performance across the complete eligible history."""
     print(
         "\nOverall multi-horizon results:\n"
     )
@@ -200,9 +211,7 @@ def print_policy(
     )
 
     if not policy.empty:
-        first = (
-            policy.iloc[0]
-        )
+        first = policy.iloc[0]
 
         print(
             "\nEvaluation timeline:"
@@ -259,8 +268,7 @@ def print_holdout_comparison(
     )
 
     print(
-        "\n"
-        "IMPORTANT: this table is diagnostic only. "
+        "\nIMPORTANT: this table is diagnostic only. "
         "Holdout performance must not be used to "
         "retroactively change the selected policy."
     )
@@ -290,34 +298,22 @@ def save_results(
 
     raw_path = (
         output_dir
-        / (
-            f"multihorizon_"
-            f"{uf_code}_raw.csv"
-        )
+        / f"multihorizon_{uf_code}_raw.csv"
     )
 
     summary_path = (
         output_dir
-        / (
-            f"multihorizon_"
-            f"{uf_code}_summary.csv"
-        )
+        / f"multihorizon_{uf_code}_summary.csv"
     )
 
     policy_path = (
         output_dir
-        / (
-            f"multihorizon_"
-            f"{uf_code}_policy.csv"
-        )
+        / f"multihorizon_{uf_code}_policy.csv"
     )
 
     comparison_path = (
         output_dir
-        / (
-            f"multihorizon_"
-            f"{uf_code}_holdout_comparison.csv"
-        )
+        / f"multihorizon_{uf_code}_holdout_comparison.csv"
     )
 
     results.to_csv(
@@ -371,10 +367,7 @@ def main() -> None:
 
     if args.uf_code not in UF_OPTIONS:
         available_states = ", ".join(
-            (
-                f"{code} "
-                f"({label})"
-            )
+            f"{code} ({label})"
             for code, label
             in UF_OPTIONS.items()
         )
@@ -384,9 +377,29 @@ def main() -> None:
             f"Available states: {available_states}"
         )
 
+    if args.origin_step < 1:
+        raise ValueError(
+            "--origin-step must be at least 1."
+        )
+
+    if args.selection_weeks < 2:
+        raise ValueError(
+            "--selection-weeks must be at least 2."
+        )
+
+    if args.holdout_weeks < 1:
+        raise ValueError(
+            "--holdout-weeks must be at least 1."
+        )
+
     if args.min_skill < 0:
         raise ValueError(
             "--min-skill cannot be negative."
+        )
+
+    if args.reporting_delay_weeks < 0:
+        raise ValueError(
+            "--reporting-delay-weeks cannot be negative."
         )
 
     uf_label = (
@@ -423,7 +436,7 @@ def main() -> None:
 
     print(
         "Selection window: "
-        f"{args.selection_weeks} target weeks"
+        f"{args.selection_weeks} mature target weeks"
     )
 
     print(
@@ -434,7 +447,13 @@ def main() -> None:
     print(
         "Promotion threshold: "
         f"{args.min_skill:.0%} MAE improvement "
-        "over Naive"
+        "over Naive overall and in both "
+        "selection subperiods"
+    )
+
+    print(
+        "Reporting-delay buffer: "
+        f"{args.reporting_delay_weeks} week(s)"
     )
 
     # --------------------------------------------------------
@@ -452,15 +471,90 @@ def main() -> None:
         )
     )
 
+    history = (
+        history
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
     print(
         f"Loaded {len(history)} weekly observations."
     )
 
+    source_start = (
+        history["date"]
+        .min()
+    )
+
+    source_end = (
+        history["date"]
+        .max()
+    )
+
     print(
-        "Analysis period: "
-        f"{history['date'].min().date()} "
+        "Available data period: "
+        f"{source_start.date()} "
         "→ "
-        f"{history['date'].max().date()}"
+        f"{source_end.date()}"
+    )
+
+    # --------------------------------------------------------
+    # REPORTING-DELAY BUFFER
+    #
+    # Recent weeks may still be revised as notifications arrive.
+    # They are therefore excluded from historical scoring.
+    #
+    # This affects evaluation only. It does NOT alter the live
+    # forecasting data pipeline.
+    # --------------------------------------------------------
+
+    if args.reporting_delay_weeks > 0:
+        if len(history) <= args.reporting_delay_weeks:
+            raise RuntimeError(
+                "Reporting-delay buffer removes all historical data."
+            )
+
+        evaluation_history = (
+            history.iloc[
+                :-args.reporting_delay_weeks
+            ]
+            .copy()
+            .reset_index(drop=True)
+        )
+
+    else:
+        evaluation_history = (
+            history.copy()
+        )
+
+    if evaluation_history.empty:
+        raise RuntimeError(
+            "No observations remain after applying "
+            "the reporting-delay buffer."
+        )
+
+    evaluation_end = (
+        evaluation_history[
+            "date"
+        ]
+        .max()
+    )
+
+    excluded_weeks = (
+        len(history)
+        - len(evaluation_history)
+    )
+
+    print(
+        "Mature evaluation period: "
+        f"{evaluation_history['date'].min().date()} "
+        "→ "
+        f"{evaluation_end.date()}"
+    )
+
+    print(
+        f"Excluded {excluded_weeks} most recent "
+        "week(s) from scoring."
     )
 
     # --------------------------------------------------------
@@ -473,7 +567,9 @@ def main() -> None:
 
     results = (
         run_multi_horizon_backtest(
-            history_df=history,
+            history_df=(
+                evaluation_history
+            ),
             horizons=HORIZONS,
             include_nb=False,
             min_history_weeks=60,
@@ -503,7 +599,7 @@ def main() -> None:
     )
 
     # --------------------------------------------------------
-    # LOCK PRODUCTION POLICY BEFORE HOLDOUT
+    # LOCK POLICY BEFORE HOLDOUT
     # --------------------------------------------------------
 
     policy = (
