@@ -6,12 +6,16 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------
-# Make the repository root importable when this file is executed as:
+# Make repository root importable when running:
 #
 #     python scripts/run_multihorizon.py
 # ---------------------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = (
+    Path(__file__)
+    .resolve()
+    .parents[1]
+)
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(
@@ -30,15 +34,12 @@ from src.data import (  # noqa: E402
 )
 
 from src.multihorizon import (  # noqa: E402
+    build_horizon_holdout_comparison,
     build_horizon_policy,
     run_multi_horizon_backtest,
     summarize_multi_horizon_backtest,
 )
 
-
-# ---------------------------------------------------------------------
-# Evaluation configuration
-# ---------------------------------------------------------------------
 
 HORIZONS = (
     1,
@@ -49,9 +50,9 @@ HORIZONS = (
 )
 
 
-# ---------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------
+# ============================================================
+# ARGUMENTS
+# ============================================================
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
@@ -78,8 +79,7 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help=(
             "Spacing between historical forecast origins. "
-            "Use 4 for a faster evaluation or 1 for every week. "
-            "Default: 4."
+            "Use 1 for every week. Default: 4."
         ),
     )
 
@@ -89,7 +89,7 @@ def parse_args() -> argparse.Namespace:
         default=52,
         help=(
             "Number of pre-holdout target weeks used for "
-            "horizon-specific model selection. Default: 52."
+            "model selection. Default: 52."
         ),
     )
 
@@ -98,8 +98,19 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=52,
         help=(
-            "Number of final target weeks reserved for untouched "
-            "evaluation. Default: 52."
+            "Number of final forecast origins reserved "
+            "for untouched evaluation. Default: 52."
+        ),
+    )
+
+    parser.add_argument(
+        "--min-skill",
+        type=float,
+        default=0.10,
+        help=(
+            "Minimum MAE improvement over Naive required "
+            "for a learned model to be promoted. "
+            "0.10 means 10%%. Default: 0.10."
         ),
     )
 
@@ -107,21 +118,21 @@ def parse_args() -> argparse.Namespace:
         "--refresh",
         action="store_true",
         help=(
-            "Redownload source data before running the evaluation."
+            "Redownload source data before evaluation."
         ),
     )
 
     return parser.parse_args()
 
 
-# ---------------------------------------------------------------------
-# Display helpers
-# ---------------------------------------------------------------------
+# ============================================================
+# PRINT HELPERS
+# ============================================================
 
-def print_summary_table(
+def print_overall_summary(
     summary,
 ) -> None:
-    """Print the overall horizon-by-model performance table."""
+    """Print performance across the complete historical evaluation."""
     print(
         "\nOverall multi-horizon results:\n"
     )
@@ -136,10 +147,10 @@ def print_summary_table(
     )
 
 
-def print_policy_table(
+def print_policy(
     policy,
 ) -> None:
-    """Print horizon-specific model selection and holdout results."""
+    """Print the horizon-specific production policy."""
     print(
         "\nHorizon-specific production policy:\n"
     )
@@ -147,35 +158,40 @@ def print_policy_table(
     columns = [
         "Horizon",
         "Selected Model",
-        "Selection N",
+        "Decision",
+        "Best Learned Candidate",
+        "Candidate Skill vs Naive",
+        "Candidate Early Skill",
+        "Candidate Late Skill",
         "Selection MAE",
-        "Holdout N",
         "Holdout MAE",
         "Holdout RMSE",
         "Holdout Bias",
-        "Naive Holdout MAE",
-        "Skill vs Naive",
+        "Holdout Skill vs Naive",
     ]
 
-    policy_display = (
+    display = (
         policy[
             columns
         ]
         .copy()
     )
 
-    # Convert skill from proportion to percentage for readability.
-    policy_display[
-        "Skill vs Naive"
-    ] = (
-        policy_display[
-            "Skill vs Naive"
-        ]
-        * 100
-    )
+    percentage_columns = [
+        "Candidate Skill vs Naive",
+        "Candidate Early Skill",
+        "Candidate Late Skill",
+        "Holdout Skill vs Naive",
+    ]
+
+    for column in percentage_columns:
+        display[column] = (
+            display[column]
+            * 100
+        )
 
     print(
-        policy_display.to_string(
+        display.to_string(
             index=False,
             float_format=lambda value: (
                 f"{value:.2f}"
@@ -184,56 +200,84 @@ def print_policy_table(
     )
 
     if not policy.empty:
-        selection_start = (
-            policy[
-                "Selection Start"
-            ].iloc[0]
-        )
-
-        selection_end = (
-            policy[
-                "Selection End"
-            ].iloc[0]
-        )
-
-        holdout_start = (
-            policy[
-                "Holdout Start"
-            ].iloc[0]
-        )
-
-        holdout_end = (
-            policy[
-                "Holdout End"
-            ].iloc[0]
+        first = (
+            policy.iloc[0]
         )
 
         print(
-            "\nEvaluation windows:"
+            "\nEvaluation timeline:"
         )
 
         print(
             "  Selection: "
-            f"{selection_start} → {selection_end}"
+            f"{first['Selection Start']} "
+            "→ "
+            f"{first['Selection End']}"
         )
 
         print(
-            "  Holdout:   "
-            f"{holdout_start} → {holdout_end}"
+            "  Policy locked: "
+            f"{first['Policy Cutoff']}"
+        )
+
+        print(
+            "  Holdout origins: "
+            f"{first['Holdout Origin Start']} "
+            "→ "
+            f"{first['Holdout Origin End']}"
         )
 
 
-# ---------------------------------------------------------------------
-# Output
-# ---------------------------------------------------------------------
+def print_holdout_comparison(
+    comparison,
+) -> None:
+    """Print every model's performance on the untouched holdout."""
+    print(
+        "\nAll-model untouched holdout comparison:\n"
+    )
+
+    display = (
+        comparison.copy()
+    )
+
+    display[
+        "Skill vs Naive"
+    ] = (
+        display[
+            "Skill vs Naive"
+        ]
+        * 100
+    )
+
+    print(
+        display.to_string(
+            index=False,
+            float_format=lambda value: (
+                f"{value:.2f}"
+            ),
+        )
+    )
+
+    print(
+        "\n"
+        "IMPORTANT: this table is diagnostic only. "
+        "Holdout performance must not be used to "
+        "retroactively change the selected policy."
+    )
+
+
+# ============================================================
+# SAVE OUTPUTS
+# ============================================================
 
 def save_results(
     results,
     summary,
     policy,
+    comparison,
     uf_code: int,
 ) -> None:
-    """Save evaluation outputs as CSV files."""
+    """Save all evaluation outputs as CSV files."""
     output_dir = (
         PROJECT_ROOT
         / "results"
@@ -246,17 +290,34 @@ def save_results(
 
     raw_path = (
         output_dir
-        / f"multihorizon_{uf_code}_raw.csv"
+        / (
+            f"multihorizon_"
+            f"{uf_code}_raw.csv"
+        )
     )
 
     summary_path = (
         output_dir
-        / f"multihorizon_{uf_code}_summary.csv"
+        / (
+            f"multihorizon_"
+            f"{uf_code}_summary.csv"
+        )
     )
 
     policy_path = (
         output_dir
-        / f"multihorizon_{uf_code}_policy.csv"
+        / (
+            f"multihorizon_"
+            f"{uf_code}_policy.csv"
+        )
+    )
+
+    comparison_path = (
+        output_dir
+        / (
+            f"multihorizon_"
+            f"{uf_code}_holdout_comparison.csv"
+        )
     )
 
     results.to_csv(
@@ -274,46 +335,65 @@ def save_results(
         index=False,
     )
 
+    comparison.to_csv(
+        comparison_path,
+        index=False,
+    )
+
     print(
         "\nSaved outputs:"
     )
 
     print(
-        f"  Raw forecasts: {raw_path}"
+        f"  Raw forecasts:      {raw_path}"
     )
 
     print(
-        f"  Summary:       {summary_path}"
+        f"  Overall summary:    {summary_path}"
     )
 
     print(
-        f"  Policy:        {policy_path}"
+        f"  Production policy:  {policy_path}"
+    )
+
+    print(
+        f"  Holdout comparison: {comparison_path}"
     )
 
 
-# ---------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------
+# ============================================================
+# MAIN
+# ============================================================
 
 def main() -> None:
-    """Run the complete real-data multi-horizon evaluation."""
+    """Run the complete real-data evaluation."""
     args = parse_args()
 
     if args.uf_code not in UF_OPTIONS:
-        available = ", ".join(
-            f"{code} ({label})"
+        available_states = ", ".join(
+            (
+                f"{code} "
+                f"({label})"
+            )
             for code, label
             in UF_OPTIONS.items()
         )
 
         raise ValueError(
             f"UF code {args.uf_code} is not configured. "
-            f"Available states: {available}"
+            f"Available states: {available_states}"
         )
 
-    uf_label = UF_OPTIONS[
-        args.uf_code
-    ]
+    if args.min_skill < 0:
+        raise ValueError(
+            "--min-skill cannot be negative."
+        )
+
+    uf_label = (
+        UF_OPTIONS[
+            args.uf_code
+        ]
+    )
 
     print(
         "\n"
@@ -330,29 +410,36 @@ def main() -> None:
     print(
         "Forecast horizons: "
         + ", ".join(
-            f"{h}w"
-            for h in HORIZONS
+            f"{horizon}w"
+            for horizon
+            in HORIZONS
         )
     )
 
     print(
-        f"Historical origin step: "
+        "Historical origin step: "
         f"{args.origin_step} week(s)"
     )
 
     print(
-        f"Selection window: "
+        "Selection window: "
         f"{args.selection_weeks} target weeks"
     )
 
     print(
-        f"Final holdout: "
-        f"{args.holdout_weeks} target weeks"
+        "Final holdout: "
+        f"{args.holdout_weeks} forecast origins"
     )
 
-    # -------------------------------------------------------------
-    # Load real SINAN data
-    # -------------------------------------------------------------
+    print(
+        "Promotion threshold: "
+        f"{args.min_skill:.0%} MAE improvement "
+        "over Naive"
+    )
+
+    # --------------------------------------------------------
+    # DATA
+    # --------------------------------------------------------
 
     print(
         f"\nLoading dengue data for {uf_label}..."
@@ -376,9 +463,9 @@ def main() -> None:
         f"{history['date'].max().date()}"
     )
 
-    # -------------------------------------------------------------
-    # Historical multi-horizon forecasting
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # HISTORICAL FORECASTS
+    # --------------------------------------------------------
 
     print(
         "\nRunning historical multi-horizon evaluation..."
@@ -390,18 +477,20 @@ def main() -> None:
             horizons=HORIZONS,
             include_nb=False,
             min_history_weeks=60,
-            origin_step=args.origin_step,
+            origin_step=(
+                args.origin_step
+            ),
         )
     )
 
     if results.empty:
         raise RuntimeError(
-            "The multi-horizon evaluation produced no results."
+            "Multi-horizon evaluation produced no results."
         )
 
-    # -------------------------------------------------------------
-    # Overall diagnostics
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # FULL-HISTORY DIAGNOSTICS
+    # --------------------------------------------------------
 
     summary = (
         summarize_multi_horizon_backtest(
@@ -409,46 +498,67 @@ def main() -> None:
         )
     )
 
-    print_summary_table(
+    print_overall_summary(
         summary
     )
 
-    # -------------------------------------------------------------
-    # Horizon-specific model policy
-    #
-    # Models are selected on a pre-holdout period and then evaluated
-    # on a later untouched period.
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # LOCK PRODUCTION POLICY BEFORE HOLDOUT
+    # --------------------------------------------------------
 
     policy = (
         build_horizon_policy(
-            results,
+            results=results,
             selection_weeks=(
                 args.selection_weeks
             ),
             holdout_weeks=(
                 args.holdout_weeks
             ),
+            min_skill_vs_naive=(
+                args.min_skill
+            ),
         )
     )
 
     if policy.empty:
         raise RuntimeError(
-            "The horizon-specific model policy produced no results."
+            "Horizon policy produced no results."
         )
 
-    print_policy_table(
+    print_policy(
         policy
     )
 
-    # -------------------------------------------------------------
-    # Save outputs
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # DIAGNOSTIC HOLDOUT COMPARISON
+    # --------------------------------------------------------
+
+    comparison = (
+        build_horizon_holdout_comparison(
+            results=results,
+            policy=policy,
+        )
+    )
+
+    if comparison.empty:
+        raise RuntimeError(
+            "Holdout comparison produced no results."
+        )
+
+    print_holdout_comparison(
+        comparison
+    )
+
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
 
     save_results(
         results=results,
         summary=summary,
         policy=policy,
+        comparison=comparison,
         uf_code=args.uf_code,
     )
 
