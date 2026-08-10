@@ -793,16 +793,12 @@ def build_horizon_policy(
                 late_skill = np.nan
 
             qualifies = (
-                overall_skill
-                >= min_skill_vs_naive
-                and np.isfinite(
-                    early_skill
-                )
-                and np.isfinite(
-                    late_skill
-                )
-                and early_skill > 0
-                and late_skill > 0
+                np.isfinite(overall_skill)
+                and np.isfinite(early_skill)
+                and np.isfinite(late_skill)
+                and overall_skill >= min_skill_vs_naive
+                and early_skill >= min_skill_vs_naive
+                and late_skill >= min_skill_vs_naive
             )
 
             candidate_rows.append(
