@@ -11,7 +11,10 @@ from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_absolute_error, mean_squared_error
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+)
 
 from src.config import MIN_BACKTEST_TRAIN
 from src.features import create_features
@@ -19,7 +22,13 @@ from src.forecasting import build_multi_step_forecast
 from src.models import fit_model_bundle
 
 
-DEFAULT_HORIZONS = (1, 2, 4, 8, 12)
+DEFAULT_HORIZONS = (
+    1,
+    2,
+    4,
+    8,
+    12,
+)
 
 
 def run_multi_horizon_backtest(
@@ -53,20 +62,19 @@ def run_multi_horizon_backtest(
         forecast origin.
     origin_step:
         Distance between successive forecast origins. Use 1 for every
-        week, or a larger value for faster exploratory evaluation.
+        week or a larger value for faster exploratory evaluation.
 
     Returns
     -------
     pd.DataFrame
-        Long-form table containing one row per origin, horizon, and
-        model.
+        One row per forecast origin, horizon, and model.
     """
     horizons = tuple(
         sorted(
-            set(
-                int(h)
-                for h in horizons
-            )
+            {
+                int(horizon)
+                for horizon in horizons
+            }
         )
     )
 
@@ -106,9 +114,7 @@ def run_multi_horizon_backtest(
             "history_df contains duplicate weekly dates."
         )
 
-    max_horizon = max(
-        horizons
-    )
+    max_horizon = max(horizons)
 
     if len(history) < (
         min_history_weeks
@@ -121,8 +127,6 @@ def run_multi_horizon_backtest(
 
     rows: list[dict[str, object]] = []
 
-    # origin_idx refers to the final observation available when a
-    # historical forecast would have been issued.
     first_origin = (
         min_history_weeks - 1
     )
@@ -145,10 +149,8 @@ def run_multi_horizon_backtest(
             .reset_index(drop=True)
         )
 
-        train_features = (
-            create_features(
-                train_history
-            )
+        train_features = create_features(
+            train_history
         )
 
         if len(train_features) < MIN_BACKTEST_TRAIN:
@@ -160,12 +162,10 @@ def run_multi_horizon_backtest(
             verbose=False,
         )
 
-        forecast = (
-            build_multi_step_forecast(
-                history=train_history,
-                bundle=bundle,
-                horizon=max_horizon,
-            )
+        forecast = build_multi_step_forecast(
+            history=train_history,
+            bundle=bundle,
+            horizon=max_horizon,
         )
 
         origin_date = pd.Timestamp(
@@ -201,9 +201,7 @@ def run_multi_horizon_backtest(
             )
 
             for model_name in bundle:
-                if model_name not in (
-                    forecast.columns
-                ):
+                if model_name not in forecast.columns:
                     continue
 
                 prediction = float(
@@ -212,33 +210,22 @@ def run_multi_horizon_backtest(
                     ]
                 )
 
+                error = (
+                    prediction
+                    - actual
+                )
+
                 rows.append(
                     {
-                        "origin_date": (
-                            origin_date
-                        ),
-                        "target_date": (
-                            target_date
-                        ),
-                        "horizon": (
-                            horizon
-                        ),
-                        "model": (
-                            model_name
-                        ),
-                        "actual": (
-                            actual
-                        ),
-                        "prediction": (
-                            prediction
-                        ),
-                        "error": (
-                            prediction
-                            - actual
-                        ),
+                        "origin_date": origin_date,
+                        "target_date": target_date,
+                        "horizon": horizon,
+                        "model": model_name,
+                        "actual": actual,
+                        "prediction": prediction,
+                        "error": error,
                         "absolute_error": abs(
-                            prediction
-                            - actual
+                            error
                         ),
                     }
                 )
@@ -300,16 +287,22 @@ def summarize_multi_horizon_backtest(
         ],
         sort=True,
     ):
-        actual = sample[
-            "actual"
-        ].to_numpy(
-            dtype=float
+        actual = (
+            sample[
+                "actual"
+            ]
+            .to_numpy(
+                dtype=float
+            )
         )
 
-        prediction = sample[
-            "prediction"
-        ].to_numpy(
-            dtype=float
+        prediction = (
+            sample[
+                "prediction"
+            ]
+            .to_numpy(
+                dtype=float
+            )
         )
 
         error = (
@@ -348,12 +341,8 @@ def summarize_multi_horizon_backtest(
             }
         )
 
-    summary = pd.DataFrame(
-        rows
-    )
-
     return (
-        summary
+        pd.DataFrame(rows)
         .sort_values(
             [
                 "Horizon",
@@ -364,34 +353,28 @@ def summarize_multi_horizon_backtest(
         .reset_index(drop=True)
     )
 
+
 def build_horizon_policy(
     results: pd.DataFrame,
     holdout_weeks: int = 52,
     selection_weeks: int = 52,
+    min_skill_vs_naive: float = 0.10,
 ) -> pd.DataFrame:
-    """Select one production model per forecast horizon.
+    """Select a robust production model separately for each horizon.
 
-    Model selection is performed on a pre-holdout period. The selected
-    model is then evaluated on a later, untouched holdout period.
+    The model-selection policy is locked before the holdout begins.
 
-    A common set of target dates is used across all horizons so that
-    1-, 2-, 4-, 8-, and 12-week forecasts are compared over the same
-    calendar periods.
+    Selection uses only forecast targets whose outcomes were known
+    before the first holdout forecast was issued.
 
-    Parameters
-    ----------
-    results:
-        Long-form output from ``run_multi_horizon_backtest``.
-    holdout_weeks:
-        Number of final common target weeks reserved for evaluation.
-    selection_weeks:
-        Number of common target weeks immediately before the holdout
-        used to choose the production model at each horizon.
+    Naive persistence is the default champion. A learned model replaces
+    it only when it:
 
-    Returns
-    -------
-    pd.DataFrame
-        Horizon-specific model policy and out-of-sample performance.
+    1. improves selection MAE by at least ``min_skill_vs_naive``;
+    2. beats Naive during the first half of the selection period; and
+    3. beats Naive during the second half of the selection period.
+
+    Holdout forecasts are issued strictly after selection has ended.
     """
     if results.empty:
         raise ValueError(
@@ -403,37 +386,111 @@ def build_horizon_policy(
             "holdout_weeks must be at least 1."
         )
 
-    if selection_weeks < 1:
+    if selection_weeks < 2:
         raise ValueError(
-            "selection_weeks must be at least 1."
+            "selection_weeks must be at least 2."
+        )
+
+    if min_skill_vs_naive < 0:
+        raise ValueError(
+            "min_skill_vs_naive cannot be negative."
         )
 
     data = results.copy()
+
+    data["origin_date"] = pd.to_datetime(
+        data["origin_date"]
+    )
 
     data["target_date"] = pd.to_datetime(
         data["target_date"]
     )
 
     horizons = sorted(
-        data["horizon"]
+        data[
+            "horizon"
+        ]
         .astype(int)
         .unique()
         .tolist()
     )
 
     # --------------------------------------------------------
-    # Find target weeks shared by EVERY horizon.
-    #
-    # This ensures that the 1-week and 12-week models are
-    # evaluated over the same calendar period.
+    # Find forecast origins shared across every horizon.
     # --------------------------------------------------------
 
+    origin_sets = []
+
+    for horizon in horizons:
+        horizon_origins = set(
+            data.loc[
+                data["horizon"]
+                == horizon,
+                "origin_date",
+            ]
+            .drop_duplicates()
+            .tolist()
+        )
+
+        origin_sets.append(
+            horizon_origins
+        )
+
+    common_origins = sorted(
+        set.intersection(
+            *origin_sets
+        )
+    )
+
+    if len(common_origins) <= holdout_weeks:
+        raise ValueError(
+            "Not enough common forecast origins to create "
+            "the requested holdout."
+        )
+
+    holdout_origins = (
+        common_origins[
+            -holdout_weeks:
+        ]
+    )
+
+    holdout_origin_start = pd.Timestamp(
+        holdout_origins[0]
+    )
+
+    holdout_origin_end = pd.Timestamp(
+        holdout_origins[-1]
+    )
+
+    # --------------------------------------------------------
+    # Selection cutoff.
+    #
+    # When the first holdout forecast is issued, only targets
+    # strictly before that date are considered known.
+    # --------------------------------------------------------
+
+    selection_cutoff = (
+        holdout_origin_start
+    )
+
+    eligible_selection = (
+        data.loc[
+            data["target_date"]
+            < selection_cutoff
+        ]
+        .copy()
+    )
+
+    # Use target weeks shared by every forecast horizon.
     target_sets = []
 
     for horizon in horizons:
-        horizon_dates = set(
-            data.loc[
-                data["horizon"] == horizon,
+        horizon_targets = set(
+            eligible_selection.loc[
+                eligible_selection[
+                    "horizon"
+                ]
+                == horizon,
                 "target_date",
             ]
             .drop_duplicates()
@@ -441,56 +498,30 @@ def build_horizon_policy(
         )
 
         target_sets.append(
-            horizon_dates
+            horizon_targets
         )
 
-    common_dates = sorted(
+    common_selection_targets = sorted(
         set.intersection(
             *target_sets
         )
     )
 
-    if len(common_dates) <= holdout_weeks:
+    if len(common_selection_targets) < 2:
         raise ValueError(
-            "Not enough common target dates to create "
-            "the requested holdout period."
-        )
-
-    # --------------------------------------------------------
-    # Final untouched holdout
-    # --------------------------------------------------------
-
-    holdout_dates = (
-        common_dates[
-            -holdout_weeks:
-        ]
-    )
-
-    pre_holdout_dates = (
-        common_dates[
-            :-holdout_weeks
-        ]
-    )
-
-    if not pre_holdout_dates:
-        raise ValueError(
-            "No pre-holdout observations are available "
+            "Not enough pre-holdout target dates "
             "for model selection."
         )
-
-    # --------------------------------------------------------
-    # Selection window immediately BEFORE holdout
-    # --------------------------------------------------------
 
     effective_selection_weeks = min(
         selection_weeks,
         len(
-            pre_holdout_dates
+            common_selection_targets
         ),
     )
 
     selection_dates = (
-        pre_holdout_dates[
+        common_selection_targets[
             -effective_selection_weeks:
         ]
     )
@@ -503,20 +534,39 @@ def build_horizon_policy(
         selection_dates[-1]
     )
 
-    holdout_start = pd.Timestamp(
-        holdout_dates[0]
+    # --------------------------------------------------------
+    # Split selection period into two temporal subperiods.
+    # --------------------------------------------------------
+
+    midpoint = (
+        len(selection_dates)
+        // 2
     )
 
-    holdout_end = pd.Timestamp(
-        holdout_dates[-1]
+    early_dates = (
+        selection_dates[
+            :midpoint
+        ]
     )
+
+    late_dates = (
+        selection_dates[
+            midpoint:
+        ]
+    )
+
+    learned_models = {
+        "Linear Regression",
+        "Random Forest",
+        "Negative Binomial",
+    }
 
     rows: list[
         dict[str, object]
     ] = []
 
     # --------------------------------------------------------
-    # Select a model independently at each horizon
+    # Select one model independently for each horizon.
     # --------------------------------------------------------
 
     for horizon in horizons:
@@ -542,53 +592,379 @@ def build_horizon_policy(
         holdout = (
             horizon_data.loc[
                 horizon_data[
-                    "target_date"
+                    "origin_date"
                 ].isin(
-                    holdout_dates
+                    holdout_origins
                 )
             ]
             .copy()
         )
 
         # ----------------------------------------------------
-        # Model selection
+        # Champion baseline: Naive.
         # ----------------------------------------------------
 
-        selection_summary = (
-            summarize_multi_horizon_backtest(
-                selection
+        naive_selection = (
+            selection.loc[
+                selection[
+                    "model"
+                ]
+                == "Naive"
+            ]
+            .copy()
+        )
+
+        if naive_selection.empty:
+            raise RuntimeError(
+                f"No Naive selection results for horizon {horizon}."
+            )
+
+        naive_selection_mae = float(
+            mean_absolute_error(
+                naive_selection[
+                    "actual"
+                ],
+                naive_selection[
+                    "prediction"
+                ],
             )
         )
 
-        if selection_summary.empty:
-            continue
+        # ----------------------------------------------------
+        # Evaluate learned challengers.
+        # ----------------------------------------------------
 
-        selection_summary = (
-            selection_summary
-            .sort_values(
-                [
-                    "MAE",
-                    "RMSE",
+        candidate_rows: list[
+            dict[str, object]
+        ] = []
+
+        for model_name in sorted(
+            learned_models
+        ):
+            candidate = (
+                selection.loc[
+                    selection[
+                        "model"
+                    ]
+                    == model_name
+                ]
+                .copy()
+            )
+
+            if candidate.empty:
+                continue
+
+            candidate_mae = float(
+                mean_absolute_error(
+                    candidate[
+                        "actual"
+                    ],
+                    candidate[
+                        "prediction"
+                    ],
+                )
+            )
+
+            overall_skill = (
+                1.0
+                - candidate_mae
+                / max(
+                    naive_selection_mae,
+                    1e-9,
+                )
+            )
+
+            # Early selection subperiod.
+            early_candidate = (
+                candidate.loc[
+                    candidate[
+                        "target_date"
+                    ].isin(
+                        early_dates
+                    )
                 ]
             )
-            .reset_index(
-                drop=True
+
+            early_naive = (
+                naive_selection.loc[
+                    naive_selection[
+                        "target_date"
+                    ].isin(
+                        early_dates
+                    )
+                ]
+            )
+
+            if (
+                len(early_candidate) > 0
+                and len(early_naive) > 0
+            ):
+                early_candidate_mae = float(
+                    mean_absolute_error(
+                        early_candidate[
+                            "actual"
+                        ],
+                        early_candidate[
+                            "prediction"
+                        ],
+                    )
+                )
+
+                early_naive_mae = float(
+                    mean_absolute_error(
+                        early_naive[
+                            "actual"
+                        ],
+                        early_naive[
+                            "prediction"
+                        ],
+                    )
+                )
+
+                early_skill = (
+                    1.0
+                    - early_candidate_mae
+                    / max(
+                        early_naive_mae,
+                        1e-9,
+                    )
+                )
+
+            else:
+                early_skill = np.nan
+
+            # Late selection subperiod.
+            late_candidate = (
+                candidate.loc[
+                    candidate[
+                        "target_date"
+                    ].isin(
+                        late_dates
+                    )
+                ]
+            )
+
+            late_naive = (
+                naive_selection.loc[
+                    naive_selection[
+                        "target_date"
+                    ].isin(
+                        late_dates
+                    )
+                ]
+            )
+
+            if (
+                len(late_candidate) > 0
+                and len(late_naive) > 0
+            ):
+                late_candidate_mae = float(
+                    mean_absolute_error(
+                        late_candidate[
+                            "actual"
+                        ],
+                        late_candidate[
+                            "prediction"
+                        ],
+                    )
+                )
+
+                late_naive_mae = float(
+                    mean_absolute_error(
+                        late_naive[
+                            "actual"
+                        ],
+                        late_naive[
+                            "prediction"
+                        ],
+                    )
+                )
+
+                late_skill = (
+                    1.0
+                    - late_candidate_mae
+                    / max(
+                        late_naive_mae,
+                        1e-9,
+                    )
+                )
+
+            else:
+                late_skill = np.nan
+
+            qualifies = (
+                overall_skill
+                >= min_skill_vs_naive
+                and np.isfinite(
+                    early_skill
+                )
+                and np.isfinite(
+                    late_skill
+                )
+                and early_skill > 0
+                and late_skill > 0
+            )
+
+            candidate_rows.append(
+                {
+                    "Model": model_name,
+                    "MAE": candidate_mae,
+                    "Overall Skill": (
+                        overall_skill
+                    ),
+                    "Early Skill": (
+                        early_skill
+                    ),
+                    "Late Skill": (
+                        late_skill
+                    ),
+                    "Qualifies": (
+                        qualifies
+                    ),
+                }
+            )
+
+        candidate_table = pd.DataFrame(
+            candidate_rows
+        )
+
+        if not candidate_table.empty:
+            candidate_table = (
+                candidate_table
+                .sort_values(
+                    [
+                        "MAE",
+                        "Model",
+                    ]
+                )
+                .reset_index(drop=True)
+            )
+
+            best_candidate = (
+                candidate_table.iloc[0]
+            )
+
+            best_candidate_name = str(
+                best_candidate[
+                    "Model"
+                ]
+            )
+
+            best_candidate_skill = float(
+                best_candidate[
+                    "Overall Skill"
+                ]
+            )
+
+            best_candidate_early_skill = float(
+                best_candidate[
+                    "Early Skill"
+                ]
+            )
+
+            best_candidate_late_skill = float(
+                best_candidate[
+                    "Late Skill"
+                ]
+            )
+
+            qualifying = (
+                candidate_table.loc[
+                    candidate_table[
+                        "Qualifies"
+                    ]
+                ]
+                .copy()
+            )
+
+        else:
+            best_candidate_name = "None"
+            best_candidate_skill = np.nan
+            best_candidate_early_skill = np.nan
+            best_candidate_late_skill = np.nan
+
+            qualifying = pd.DataFrame()
+
+        # ----------------------------------------------------
+        # Champion / challenger decision.
+        # ----------------------------------------------------
+
+        if not qualifying.empty:
+            winner = (
+                qualifying
+                .sort_values(
+                    [
+                        "MAE",
+                        "Model",
+                    ]
+                )
+                .iloc[0]
+            )
+
+            selected_model = str(
+                winner[
+                    "Model"
+                ]
+            )
+
+            decision = (
+                "Learned model promoted"
+            )
+
+        else:
+            selected_model = (
+                "Naive"
+            )
+
+            decision = (
+                "Naive retained"
+            )
+
+        selected_selection = (
+            selection.loc[
+                selection[
+                    "model"
+                ]
+                == selected_model
+            ]
+            .copy()
+        )
+
+        selection_mae = float(
+            mean_absolute_error(
+                selected_selection[
+                    "actual"
+                ],
+                selected_selection[
+                    "prediction"
+                ],
             )
         )
 
-        winner = (
-            selection_summary
-            .iloc[0]
+        selection_rmse = float(
+            np.sqrt(
+                mean_squared_error(
+                    selected_selection[
+                        "actual"
+                    ],
+                    selected_selection[
+                        "prediction"
+                    ],
+                )
+            )
         )
 
-        selected_model = str(
-            winner[
-                "Model"
-            ]
+        selection_skill = (
+            1.0
+            - selection_mae
+            / max(
+                naive_selection_mae,
+                1e-9,
+            )
         )
 
         # ----------------------------------------------------
-        # Evaluate ONLY selected model on untouched holdout
+        # Untouched holdout.
         # ----------------------------------------------------
 
         selected_holdout = (
@@ -601,7 +977,20 @@ def build_horizon_policy(
             .copy()
         )
 
-        if selected_holdout.empty:
+        naive_holdout = (
+            holdout.loc[
+                holdout[
+                    "model"
+                ]
+                == "Naive"
+            ]
+            .copy()
+        )
+
+        if (
+            selected_holdout.empty
+            or naive_holdout.empty
+        ):
             continue
 
         actual = (
@@ -622,7 +1011,7 @@ def build_horizon_policy(
             )
         )
 
-        error = (
+        errors = (
             prediction
             - actual
         )
@@ -644,70 +1033,68 @@ def build_horizon_policy(
         )
 
         holdout_bias = float(
-            error.mean()
+            errors.mean()
         )
 
-        # ----------------------------------------------------
-        # Skill relative to Naive on EXACT SAME holdout weeks
-        # ----------------------------------------------------
-
-        naive_holdout = (
-            holdout.loc[
-                holdout[
-                    "model"
-                ]
-                == "Naive"
-            ]
-            .copy()
+        naive_holdout_mae = float(
+            mean_absolute_error(
+                naive_holdout[
+                    "actual"
+                ],
+                naive_holdout[
+                    "prediction"
+                ],
+            )
         )
 
-        if not naive_holdout.empty:
-            naive_mae = float(
-                mean_absolute_error(
-                    naive_holdout[
-                        "actual"
-                    ],
-                    naive_holdout[
-                        "prediction"
-                    ],
-                )
+        holdout_skill = (
+            1.0
+            - holdout_mae
+            / max(
+                naive_holdout_mae,
+                1e-9,
             )
-
-            skill_vs_naive = (
-                1.0
-                - holdout_mae
-                / max(
-                    naive_mae,
-                    1e-9,
-                )
-            )
-
-        else:
-            naive_mae = np.nan
-            skill_vs_naive = np.nan
+        )
 
         rows.append(
             {
-                "Horizon": int(
-                    horizon
+                "Horizon": (
+                    int(horizon)
                 ),
                 "Selected Model": (
                     selected_model
                 ),
+                "Decision": (
+                    decision
+                ),
+                "Best Learned Candidate": (
+                    best_candidate_name
+                ),
+                "Candidate Skill vs Naive": (
+                    best_candidate_skill
+                ),
+                "Candidate Early Skill": (
+                    best_candidate_early_skill
+                ),
+                "Candidate Late Skill": (
+                    best_candidate_late_skill
+                ),
                 "Selection N": int(
-                    winner[
-                        "N"
-                    ]
+                    len(
+                        selected_selection
+                    )
                 ),
-                "Selection MAE": float(
-                    winner[
-                        "MAE"
-                    ]
+                "Selection MAE": (
+                    selection_mae
                 ),
-                "Selection RMSE": float(
-                    winner[
-                        "RMSE"
-                    ]
+                "Selection RMSE": (
+                    selection_rmse
+                ),
+                "Naive Selection MAE": (
+                    naive_selection_mae
+                ),
+                "Selection Skill vs Naive": (
+                    selection_skill
                 ),
                 "Holdout N": int(
                     len(
@@ -724,10 +1111,10 @@ def build_horizon_policy(
                     holdout_bias
                 ),
                 "Naive Holdout MAE": (
-                    naive_mae
+                    naive_holdout_mae
                 ),
-                "Skill vs Naive": (
-                    skill_vs_naive
+                "Holdout Skill vs Naive": (
+                    holdout_skill
                 ),
                 "Selection Start": (
                     selection_start
@@ -735,23 +1122,224 @@ def build_horizon_policy(
                 "Selection End": (
                     selection_end
                 ),
-                "Holdout Start": (
-                    holdout_start
+                "Policy Cutoff": (
+                    selection_cutoff
                 ),
-                "Holdout End": (
-                    holdout_end
+                "Holdout Origin Start": (
+                    holdout_origin_start
+                ),
+                "Holdout Origin End": (
+                    holdout_origin_end
                 ),
             }
         )
 
     return (
-        pd.DataFrame(
-            rows
-        )
+        pd.DataFrame(rows)
         .sort_values(
             "Horizon"
         )
-        .reset_index(
-            drop=True
+        .reset_index(drop=True)
+    )
+
+
+def build_horizon_holdout_comparison(
+    results: pd.DataFrame,
+    policy: pd.DataFrame,
+) -> pd.DataFrame:
+    """Evaluate every model on the untouched holdout origins.
+
+    This is diagnostic only.
+
+    Holdout performance must not be used to retroactively change the
+    model policy that was selected before the holdout began.
+    """
+    if results.empty:
+        raise ValueError(
+            "Multi-horizon results are empty."
         )
+
+    if policy.empty:
+        raise ValueError(
+            "Horizon policy is empty."
+        )
+
+    data = results.copy()
+
+    data["origin_date"] = pd.to_datetime(
+        data["origin_date"]
+    )
+
+    rows: list[
+        dict[str, object]
+    ] = []
+
+    for _, policy_row in policy.iterrows():
+        horizon = int(
+            policy_row[
+                "Horizon"
+            ]
+        )
+
+        selected_model = str(
+            policy_row[
+                "Selected Model"
+            ]
+        )
+
+        holdout_start = pd.Timestamp(
+            policy_row[
+                "Holdout Origin Start"
+            ]
+        )
+
+        holdout_end = pd.Timestamp(
+            policy_row[
+                "Holdout Origin End"
+            ]
+        )
+
+        horizon_holdout = (
+            data.loc[
+                (
+                    data[
+                        "horizon"
+                    ]
+                    == horizon
+                )
+                & (
+                    data[
+                        "origin_date"
+                    ]
+                    >= holdout_start
+                )
+                & (
+                    data[
+                        "origin_date"
+                    ]
+                    <= holdout_end
+                )
+            ]
+            .copy()
+        )
+
+        naive = (
+            horizon_holdout.loc[
+                horizon_holdout[
+                    "model"
+                ]
+                == "Naive"
+            ]
+            .copy()
+        )
+
+        if naive.empty:
+            continue
+
+        naive_mae = float(
+            mean_absolute_error(
+                naive[
+                    "actual"
+                ],
+                naive[
+                    "prediction"
+                ],
+            )
+        )
+
+        for (
+            model_name,
+            sample,
+        ) in horizon_holdout.groupby(
+            "model"
+        ):
+            actual = (
+                sample[
+                    "actual"
+                ]
+                .to_numpy(
+                    dtype=float
+                )
+            )
+
+            prediction = (
+                sample[
+                    "prediction"
+                ]
+                .to_numpy(
+                    dtype=float
+                )
+            )
+
+            errors = (
+                prediction
+                - actual
+            )
+
+            mae = float(
+                mean_absolute_error(
+                    actual,
+                    prediction,
+                )
+            )
+
+            rmse = float(
+                np.sqrt(
+                    mean_squared_error(
+                        actual,
+                        prediction,
+                    )
+                )
+            )
+
+            skill = (
+                1.0
+                - mae
+                / max(
+                    naive_mae,
+                    1e-9,
+                )
+            )
+
+            rows.append(
+                {
+                    "Horizon": (
+                        horizon
+                    ),
+                    "Model": str(
+                        model_name
+                    ),
+                    "Selected": (
+                        str(
+                            model_name
+                        )
+                        == selected_model
+                    ),
+                    "N": int(
+                        len(sample)
+                    ),
+                    "MAE": (
+                        mae
+                    ),
+                    "RMSE": (
+                        rmse
+                    ),
+                    "Bias": float(
+                        errors.mean()
+                    ),
+                    "Skill vs Naive": (
+                        skill
+                    ),
+                }
+            )
+
+    return (
+        pd.DataFrame(rows)
+        .sort_values(
+            [
+                "Horizon",
+                "MAE",
+            ]
+        )
+        .reset_index(drop=True)
     )
