@@ -1,11 +1,27 @@
-# Dengue Surveillance Dashboard
+# Dengue Surveillance & Forecasting Dashboard
 
-An end-to-end dengue surveillance and forecasting application built with Python and Streamlit, using official Brazilian Ministry of Health notification data.
+An end-to-end public-health data product for monitoring and forecasting weekly dengue notifications in Brazil.
 
-**Live dashboard:**  
-https://dengue-surveillance.streamlit.app/
+**[Launch the live dashboard](https://dengue-surveillance.streamlit.app/)**
 
-<img width="1512" height="615" alt="Screenshot 2026-08-09 at 6 45 15 PM" src="https://github.com/user-attachments/assets/3e121289-12e5-4625-aaa0-1105c6a12608" />
+<img width="1512" height="615" alt="Dengue surveillance dashboard" src="https://github.com/user-attachments/assets/3e121289-12e5-4625-aaa0-1105c6a12608" />
+
+## Highlights
+
+- Ingests official Brazilian Ministry of Health SINAN/Dengue data
+- Processes large source files in 250,000-row chunks with Parquet caching
+- Benchmarks naive, seasonal, linear, tree-based, and count-regression forecasting approaches
+- Uses expanding-window backtesting to avoid look-ahead leakage
+- Separates model selection from final holdout evaluation
+- Produces recursive multi-week forecasts with empirical uncertainty bands
+- Includes automated tests and GitHub Actions CI
+- Deployed as an interactive Streamlit application
+
+**Current coverage:** Espírito Santo, Rio de Janeiro, Minas Gerais, São Paulo, and Bahia
+
+### Stack
+
+`Python` `pandas` `scikit-learn` `statsmodels` `Plotly` `Streamlit` `PyArrow` `pytest`
 
 ---
 
@@ -96,7 +112,8 @@ dengue-surveillance-dashboard/
 │   ├── forecasting.py      # Recursive forecasting and stabilization
 │   └── pipeline.py         # End-to-end orchestration
 │
-├── cp_shared_explained.ipynb
+├── notebooks/
+├── tests/
 ├── requirements.txt
 └── README.md
 ```
@@ -123,7 +140,7 @@ The modeling analysis begins in **January 2023**, while earlier observations can
 
 ### Data source
 
-Brazilian Ministry of Health — SINAN/Dengue Open Data
+Brazilian Ministry of Health, SINAN/Dengue Open Data
 
 https://dadosabertos.saude.gov.br/
 
@@ -207,9 +224,9 @@ This prevents the final test period from being used directly to choose the model
 
 Forecasts are evaluated using both numerical error and surveillance-oriented behavior:
 
-- **MAE** — Mean Absolute Error
-- **RMSE** — Root Mean Squared Error
-- **Direction Accuracy** — whether the model correctly predicts the direction of week-over-week change
+- **MAE**: Mean Absolute Error
+- **RMSE**: Root Mean Squared Error
+- **Direction Accuracy**: whether the model correctly predicts the direction of week-over-week change
 - **Rising-week Precision**
 - **Rising-week Recall**
 - **Rising-week F1**
@@ -337,6 +354,8 @@ Inspect:
 - chunked data ingestion
 - Parquet caching
 - expanding-window evaluation
+- automated tests
+- GitHub Actions CI
 - deployed web application
 
 ---
@@ -403,7 +422,7 @@ The final evaluation window is not directly used to choose the production model.
 The application evaluates both numerical forecast error and the ability to detect increases in dengue activity.
 
 **The notebook is not the production backend**  
-The deployed application uses modular Python code under `src/`; the notebook remains an analysis and development artifact.
+The deployed application uses modular Python code under `src/`; notebooks remain analysis and development artifacts.
 
 ---
 
@@ -435,7 +454,6 @@ Potential extensions include:
 - model spatial relationships between neighboring states;
 - test gradient-boosted and probabilistic forecasting models;
 - improve uncertainty calibration;
-- add automated testing and continuous integration;
 - monitor forecast drift over time; and
 - expose historical forecast snapshots for reproducibility.
 
