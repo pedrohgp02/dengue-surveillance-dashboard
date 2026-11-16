@@ -1,8 +1,12 @@
 """Data loading, caching, and preprocessing for dengue surveillance."""
 
 import json
+import tempfile
+import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 import pandas as pd
 import requests
@@ -398,6 +402,46 @@ def get_cache_info(
         return {}
 
 
+@contextmanager
+def _open_remote_zipped_csv(
+    url: str,
+    timeout: int = 60,
+) -> Iterator[IO[bytes]]:
+    """Download a zipped CSV to disk and yield a stream of its CSV member.
+
+    Passing the URL straight to ``pd.read_csv(..., compression="zip")``
+    holds the archive in memory and, with pandas 3, decompresses most of
+    the CSV up front even when ``chunksize`` is set. For the 2024 file
+    (~1.8 GB uncompressed) that exceeds Streamlit Community Cloud's
+    memory limit. Spooling the archive to a temporary file and streaming
+    the member keeps peak memory roughly constant.
+    """
+    with tempfile.TemporaryFile() as archive_file:
+        with requests.get(
+            url,
+            stream=True,
+            timeout=timeout,
+        ) as response:
+            response.raise_for_status()
+
+            for block in response.iter_content(
+                chunk_size=1 << 20
+            ):
+                archive_file.write(block)
+
+        archive_file.seek(0)
+
+        with zipfile.ZipFile(archive_file) as archive:
+            csv_name = next(
+                name
+                for name in archive.namelist()
+                if name.lower().endswith(".csv")
+            )
+
+            with archive.open(csv_name) as csv_file:
+                yield csv_file
+
+
 def load_dengue_year(
     year: int,
     uf_code: int = TARGET_UF_CODE,
@@ -441,60 +485,61 @@ def load_dengue_year(
         pd.DataFrame
     ] = []
 
-    for chunk in pd.read_csv(
-        data_urls[year],
-        compression="zip",
-        encoding="latin1",
-        usecols=usecols,
-        low_memory=False,
-        chunksize=250_000,
-    ):
-        chunk["DT_SIN_PRI"] = pd.to_datetime(
-            chunk["DT_SIN_PRI"],
-            errors="coerce",
-        )
-
-        chunk = chunk.dropna(
-            subset=["DT_SIN_PRI"]
-        )
-
-        chunk = chunk.loc[
-            chunk["SG_UF"] == uf_code
-        ].copy()
-
-        if chunk.empty:
-            continue
-
-        raw_count += int(len(chunk))
-
-        # Align each notification to Monday so every observation is
-        # grouped into a consistent weekly bucket.
-        chunk["week_start"] = (
-            chunk["DT_SIN_PRI"]
-            - pd.to_timedelta(
-                chunk[
-                    "DT_SIN_PRI"
-                ].dt.weekday,
-                unit="D",
+    with _open_remote_zipped_csv(
+        data_urls[year]
+    ) as csv_file:
+        for chunk in pd.read_csv(
+            csv_file,
+            encoding="latin1",
+            usecols=usecols,
+            chunksize=250_000,
+        ):
+            chunk["DT_SIN_PRI"] = pd.to_datetime(
+                chunk["DT_SIN_PRI"],
+                errors="coerce",
             )
-        )
 
-        chunk["notifications"] = 1
-
-        weekly_part = (
-            chunk.groupby(
-                "week_start",
-                as_index=False,
-            )["notifications"]
-            .sum()
-            .sort_values(
-                "week_start"
+            chunk = chunk.dropna(
+                subset=["DT_SIN_PRI"]
             )
-        )
 
-        weekly_parts.append(
-            weekly_part
-        )
+            chunk = chunk.loc[
+                chunk["SG_UF"] == uf_code
+            ].copy()
+
+            if chunk.empty:
+                continue
+
+            raw_count += int(len(chunk))
+
+            # Align each notification to Monday so every observation is
+            # grouped into a consistent weekly bucket.
+            chunk["week_start"] = (
+                chunk["DT_SIN_PRI"]
+                - pd.to_timedelta(
+                    chunk[
+                        "DT_SIN_PRI"
+                    ].dt.weekday,
+                    unit="D",
+                )
+            )
+
+            chunk["notifications"] = 1
+
+            weekly_part = (
+                chunk.groupby(
+                    "week_start",
+                    as_index=False,
+                )["notifications"]
+                .sum()
+                .sort_values(
+                    "week_start"
+                )
+            )
+
+            weekly_parts.append(
+                weekly_part
+            )
 
     if weekly_parts:
         weekly = (
